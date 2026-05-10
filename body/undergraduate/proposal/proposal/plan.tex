@@ -2,4 +2,27 @@
 
 \subsection{进度安排}
 
+\begin{table}[H]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.15}
+    \caption{研究计划进度安排}
+    \begin{tabularx}{\textwidth}{p{0.15\textwidth}p{0.18\textwidth}X}
+        \toprule
+        阶段 & 时间安排 & 主要任务 \\
+        \midrule
+        阶段一 & 第 1--2 周 & 完成文献综述、研读 TokenPacker 与 VideoLLaMA2 论文，梳理模板并撰写开题报告。 \\
+        阶段二 & 第 3--4 周 & 阅读并理解 VideoLLaMA2 代码结构，定位 vision tower、\texttt{encode\_images\_or\_videos()} 与 STC connector 接口。 \\
+        阶段三 & 第 5--7 周 & 完成 vision tower 双路特征输出、TokenPacker 输出维修改、video\_tokenpacker\_wrapper 封装与主干接入。 \\
+        阶段四 & 第 8--9 周 & 进行推理调试和小规模实验，统计压缩前后 token 数量、耗时和显存，修复维度或接口问题。 \\
+        阶段五 & 第 10--12 周 & 完成对比实验与简单消融实验，整理实验表格、图示与分析结论。 \\
+        阶段六 & 第 13--14 周 & 完成毕业论文初稿、修改稿和答辩材料，准备汇报 PPT 与演讲稿。 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
 \subsection{预期目标}
+
+本课题预期实现以下目标。第一，完成 TokenPacker 向 VideoLLaMA2-7B-16F 的成功迁移，形成可运行的“vision tower $\to$ TokenPacker $\to$ STC connector $\to$ LLM”推理链路。第二，在若干代表性视频样本或验证集上，观察到视觉 token 数量明显减少，并在推理耗时或显存占用上获得可量化的优化。第三，在合理压缩率下尽量保持视频理解性能稳定，使模型在效率提升与性能保持之间达到较好平衡。第四，形成一套面向本科毕设可复现的技术总结，包括模块改造点、关键接口、实验设计、结果分析与局限讨论。
+
+若时间允许，论文还将进一步比较不同 scale factor、不同多层特征组合及不同输入视频长度对实验结果的影响，尝试总结“何种视频场景更适合先做逐帧空间压缩”的经验规律，为后续继续研究时空联合压缩策略提供依据。

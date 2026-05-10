@@ -1,0 +1,362 @@
+\cleardoublepage
+
+\section{相关理论与关键技术}
+
+本章主要介绍本文所涉及的核心理论基础与关键模型结构，为后续视频视觉 token 压缩方案的设计提供技术支撑。本文的研究对象是多模态视频大模型中的视觉 token 高效压缩问题，其核心矛盾在于：视频输入相比静态图像包含更长的时间维度和更多的视觉冗余，而现有多模态大模型通常需要将视觉特征转换为大量视觉 token 后输入大语言模型，从而带来较高的显存占用与推理延迟。为此，本章首先介绍 Transformer 与注意力机制，分析 token 数量与模型计算复杂度之间的关系；随后介绍 CLIP 视觉编码器，说明视频帧经过视觉编码后如何产生大量 patch token；进一步介绍本文所采用的基础视频大模型 VideoLLaMA2，重点分析其 STC Connector 的时空建模机制；最后介绍 TokenPacker 的视觉 token 压缩原理，并分析其从图像场景迁移到视频场景时面临的适配问题。
+
+\subsection{Transformer 与注意力机制}
+
+Transformer 是当前大语言模型与多模态大模型的基础结构之一。与传统循环神经网络依赖顺序递归建模不同，Transformer 通过注意力机制对序列中不同位置的 token 进行全局交互建模，从而具备较强的长距离依赖捕获能力和并行计算能力\cite{transformer2017}。在多模态大模型中，文本、图像和视频等不同模态的信息通常都会被组织为 token 序列，并输入 Transformer 结构中进行统一建模。因此，理解 Transformer 的注意力机制及其复杂度特征，是分析多模态视频大模型推理瓶颈的基础。
+
+\subsubsection{自注意力机制}
+
+Self-Attention 是 Transformer 的核心计算单元。给定输入 token 序列 $X\in\mathbb{R}^{N\times d}$，其中 $N$ 表示 token 数量，$d$ 表示 token 特征维度。Self-Attention 首先通过线性变换将输入映射为 Query、Key 和 Value 三组向量：
+
+\begin{equation}
+    \label{equ:qkv_projection}
+    Q=XW^Q,\quad K=XW^K,\quad V=XW^V
+\end{equation}
+
+其中，$W^Q$、$W^K$ 和 $W^V$ 分别表示可学习的线性投影矩阵。随后，模型通过 Query 与 Key 的点积计算 token 之间的相关性，并使用 Softmax 函数得到注意力权重，最终对 Value 进行加权求和。其计算过程可表示为：
+
+\begin{equation}
+    \label{equ:self_attention}
+    \mathrm{Attention}(Q,K,V)=\mathrm{Softmax}\left(\frac{QK^{T}}{\sqrt{d_k}}\right)V
+\end{equation}
+
+其中，$d_k$ 表示 Key 向量的维度，$\sqrt{d_k}$ 用于缩放点积结果，避免维度较大时注意力分布过于尖锐。通过这一机制，序列中每个 token 都能够与其他 token 建立关联，从而获得包含全局上下文的信息表示。
+
+在文本任务中，token 通常对应词元或子词单元；在视觉任务中，token 通常对应图像 patch；在视频任务中，token 则进一步扩展为由多帧图像 patch 组成的时空 token 序列。因此，当输入从文本或单帧图像扩展到视频时，token 数量会显著增加，注意力计算成本也随之上升。
+
+\subsubsection{多头注意力机制}
+
+为了增强注意力机制的表达能力，Transformer 进一步引入 Multi-Head Attention。多头注意力将输入特征映射到多个不同的子空间中，并在每个子空间内独立计算注意力，最后将多个注意力头的结果拼接并进行线性变换。其形式如下：
+
+\begin{equation}
+    \label{equ:multi_head_attention}
+    \mathrm{MultiHead}(Q,K,V)=\mathrm{Concat}(head_1,head_2,\dots,head_h)W^O
+\end{equation}
+
+其中，第 $i$ 个注意力头定义为：
+
+\begin{equation}
+    \label{equ:attention_head}
+    head_i=\mathrm{Attention}(QW_i^Q,KW_i^K,VW_i^V)
+\end{equation}
+
+多头注意力能够使模型从不同表示子空间中捕获多样化的依赖关系。例如，在视觉多模态任务中，不同注意力头可能分别关注物体边缘、局部纹理、空间位置关系或语义区域；在视频理解任务中，不同注意力头还可能对短时动作变化、跨帧目标关联以及长时序事件演化产生不同响应。因此，多头注意力为视频多模态模型提供了较强的表达能力。
+
+\subsubsection{Token 数量与计算复杂度}
+
+虽然 Self-Attention 具备全局建模能力，但其计算复杂度与输入 token 数量呈平方关系。由式 \ref{equ:self_attention} 可知，注意力权重矩阵 $QK^T$ 的尺寸为 $N\times N$，因此 Self-Attention 的主要时间复杂度为：
+
+\begin{equation}
+    \label{equ:attention_complexity}
+    O(N^2d)
+\end{equation}
+
+其中，$N$ 表示 token 数量，$d$ 表示特征维度。当 $d$ 固定时，计算复杂度主要受 $N^2$ 控制。与此同时，注意力矩阵本身也需要占用 $O(N^2)$ 的显存空间。因此，当输入 token 数量增加时，Transformer 的计算开销和显存占用都会显著上升。
+
+对于视频输入而言，假设每帧图像产生 $n$ 个视觉 token，视频采样帧数为 $t$，则视频视觉 token 总数为：
+
+\begin{equation}
+    \label{equ:video_token_number}
+    N_{video}=t\times n
+\end{equation}
+
+若直接将所有视频视觉 token 输入 Transformer，则注意力复杂度可表示为：
+
+\begin{equation}
+    \label{equ:video_attention_complexity}
+    O((t n)^2 d)
+\end{equation}
+
+由此可见，视频输入不仅包含空间维度上的大量 patch token，还引入了时间维度上的帧数扩展，使得 token 数量相比图像场景进一步放大。对于多模态视频大模型而言，视觉 token 在进入大语言模型后会参与后续 prefill 阶段的上下文计算，其数量直接影响推理时间和显存占用。因此，降低视频视觉 token 数量是提升视频大模型推理效率的重要途径。
+
+\subsection{CLIP 视觉编码器}
+
+CLIP 是一种通过大规模图文对比学习训练得到的视觉语言模型，其核心思想是将图像和文本映射到统一语义空间中，使匹配的图文对具有更高相似度，不匹配的图文对具有更低相似度\cite{clip2021}。由于 CLIP 在大规模图文数据上预训练，具备较强的开放词汇视觉语义表征能力，因此被广泛用于多模态大模型的视觉编码器。例如，LLaVA、MiniGPT-4、VideoLLaMA 和 VideoLLaMA2 等模型均采用或借鉴了 CLIP 视觉编码器作为视觉特征提取模块\cite{llava2023,minigpt42023,videollama2023,videollama22024}。
+
+\subsubsection{Patch Embedding}
+
+CLIP 的视觉编码器通常采用 Vision Transformer 结构。Vision Transformer 首先将输入图像划分为若干个不重叠的 patch，然后将每个 patch 展平并映射为一个视觉 token\cite{vit2021}。设输入图像尺寸为 $H\times W$，patch 尺寸为 $P\times P$，则 patch token 数量为：
+
+\begin{equation}
+    \label{equ:patch_number}
+    N=\frac{H\times W}{P^2}
+\end{equation}
+
+以常见的 CLIP-ViT-L/14-336 为例，输入图像尺寸为 $336\times336$，patch 尺寸为 $14\times14$，则单帧图像对应的 patch token 数量为：
+
+\begin{equation}
+    \label{equ:clip_patch_number}
+    N=\frac{336\times336}{14^2}=576
+\end{equation}
+
+这意味着对于单张图像而言，视觉编码器会输出 576 个空间 patch token。若输入为视频，并采样 $t$ 帧，则仅视觉编码阶段就会产生 $576t$ 个原始视觉 token。例如，当采样帧数为 16 时，原始视觉 token 数量可达到：
+
+\begin{equation}
+    \label{equ:clip_video_token_number}
+    N_{video}=16\times576=9216
+\end{equation}
+
+如果进一步考虑多层 hidden states、额外的全局 token 或后续时空融合模块中的中间特征，实际参与模型计算的视觉表示规模会进一步扩大。因此，视频帧级 CLIP 编码虽然能够较好地保留空间视觉信息，但也带来了显著的 token 冗余问题。
+
+\subsubsection{Vision Transformer 特征建模}
+
+在完成 patch embedding 后，CLIP 视觉编码器将 patch token 输入 Vision Transformer 中进行特征建模。Vision Transformer 通过多层 Self-Attention 和前馈网络逐层更新视觉 token 表示，使每个 patch token 能够感知图像中其他区域的信息。其单层 Transformer Block 可概括为：
+
+\begin{equation}
+    \label{equ:vit_block_attention}
+    X' = X + \mathrm{MSA}(\mathrm{LN}(X))
+\end{equation}
+
+\begin{equation}
+    \label{equ:vit_block_ffn}
+    X'' = X' + \mathrm{FFN}(\mathrm{LN}(X'))
+\end{equation}
+
+其中，$\mathrm{MSA}$ 表示多头自注意力模块，$\mathrm{FFN}$ 表示前馈网络，$\mathrm{LN}$ 表示层归一化操作。通过堆叠多个 Transformer Block，CLIP 能够逐步从低层局部视觉模式中抽象出高层语义特征。
+
+\subsubsection{Hidden States 输出与多层特征}
+
+CLIP 视觉编码器的不同层 hidden states 具有不同的语义层次。通常而言，浅层 hidden states 更关注颜色、纹理、边缘等局部细节；深层 hidden states 则包含更强的目标语义与场景理解信息。对于多模态大模型而言，仅使用最后一层特征虽然能够获得较强的语义表示，但可能损失部分细粒度视觉细节。
+
+TokenPacker 正是利用了这一特点，将 CLIP 的多层视觉特征作为高分辨率 region cues，为低分辨率 query token 提供细粒度参考信息\cite{tokenpacker2024}。这一设计说明，在视觉 token 压缩过程中，并不只是简单减少 token 数量，还需要考虑压缩后 token 是否仍然保留足够的局部细节和语义信息。
+
+\subsubsection{视频帧视觉特征提取流程}
+
+在视频多模态大模型中，CLIP 通常以逐帧方式提取视觉特征。设输入视频为 $V$，经过帧采样后得到 $t$ 帧图像：
+
+\begin{equation}
+    \label{equ:sampled_frames}
+    V=\{I_1,I_2,\dots,I_t\}
+\end{equation}
+
+每一帧图像 $I_i$ 经过 CLIP 视觉编码器后得到视觉特征：
+
+\begin{equation}
+    \label{equ:clip_frame_feature}
+    F_i=\mathrm{CLIP}(I_i), \quad F_i\in\mathbb{R}^{n\times d}
+\end{equation}
+
+将所有帧的视觉特征堆叠后，可以得到视频视觉特征：
+
+\begin{equation}
+    \label{equ:clip_video_feature}
+    F=\{F_1,F_2,\dots,F_t\}, \quad F\in\mathbb{R}^{t\times n\times d}
+\end{equation}
+
+在实际实现中，为了适配批处理计算，特征形状常被组织为：
+
+\begin{equation}
+    \label{equ:clip_video_feature_batch}
+    F\in\mathbb{R}^{b\times t\times n\times d}
+\end{equation}
+
+其中，$b$ 表示 batch size，$t$ 表示采样帧数，$n$ 表示单帧 patch token 数量，$d$ 表示视觉特征维度。该特征结构同时包含时间维度和空间维度，是后续 STC Connector 进行时空建模的输入基础。也正因为该结构中 $t$ 与 $n$ 的乘积较大，视频视觉 token 压缩成为本文研究的关键问题。
+
+\subsection{VideoLLaMA2 模型架构}
+
+VideoLLaMA2 是一种面向视频理解任务的多模态大模型，其目标是在视频问答、视频描述以及音视频理解等任务中增强模型对时空动态信息的建模能力\cite{videollama22024}。与静态图像多模态模型相比，VideoLLaMA2 需要处理连续视频帧中的目标变化、动作过程和事件演化，因此其核心问题不只是视觉语义对齐，还包括如何有效建模视频的空间信息与时间信息。
+
+\subsubsection{整体结构}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{background/VideoLLaMA}
+    \caption{\label{fig:videollama2_architecture}VideoLLaMA2 模型架构示意图}
+\end{figure}
+
+VideoLLaMA2 延续了多模态大模型中“视觉编码器—连接模块—大语言模型”的基本范式。对于视觉语言分支，输入视频首先经过帧采样模块得到固定数量的视频帧；随后，每一帧被缩放到统一尺寸并输入图像级视觉编码器中提取视觉特征；接着，视觉特征进入 STC Connector 进行时空融合与 token 下采样；最后，处理后的视觉 token 与文本 prompt 一起输入大语言模型，由大语言模型生成回答。
+
+其中，Vision Tower 通常采用 CLIP-ViT-L/14 等图像级视觉编码器。VideoLLaMA2 选择图像级编码器而非直接采用视频编码器，主要原因在于图像编码器能够兼容不同帧采样策略，并且便于在帧级特征基础上进行灵活的视频聚合\cite{videollama22024}。
+
+设视频经过采样后包含 $t$ 帧，每帧经视觉编码器得到 $n$ 个 patch token，每个 token 的维度为 $d$，则视觉编码器输出可表示为：
+
+\begin{equation}
+    \label{equ:videollama2_vision_output}
+    X\in\mathbb{R}^{b\times t\times n\times d}
+\end{equation}
+
+该输出保留了视频的帧级结构和每帧内部的空间 patch 结构。后续 STC Connector 正是在此基础上进行空间交互和时空聚合。
+
+\subsubsection{STC Connector 原理}
+
+STC Connector 是 VideoLLaMA2 中用于视频时空建模的关键模块。相比 VideoLLaMA1 中使用的 Q-Former，STC Connector 更强调保持视觉 token 的时空顺序，并通过卷积结构进行空间交互与时空下采样\cite{videollama22024}。其整体设计遵循三个原则：第一，保持输出视觉 token 的时空顺序；第二，减少时空 token 数量；第三，缓解时空下采样过程中的信息损失。
+
+STC Connector 主要由两个 Spatial Interaction 模块和一个 Spatial-Temporal Aggregation 模块组成。Spatial Interaction 模块通常采用 RegStage 卷积块实现，用于增强局部空间邻域的信息交互；Spatial-Temporal Aggregation 模块则采用三维卷积进行时间维和空间维的联合下采样。其抽象形式可表示为：
+
+\begin{equation}
+    \label{equ:stc_connector}
+    X_{stc}=f_{s2}(f_{down}(f_{s1}(X)))
+\end{equation}
+
+其中，$f_{s1}$ 和 $f_{s2}$ 表示前后两个空间交互模块，$f_{down}$ 表示时空下采样模块，$X$ 表示输入视频视觉特征，$X_{stc}$ 表示经过 STC Connector 处理后的时空视觉表示。
+
+在具体实现中，STC Connector 首先对输入特征进行空间交互，以增强帧内局部区域的视觉表达；随后通过 3D convolution 在时间维和空间维上进行联合下采样，从而降低 token 数量；最后再通过空间交互模块对下采样后的特征进行补充建模，以缓解信息压缩造成的局部细节损失。
+
+若输入特征形状为 $b\times t\times h\times w\times d$，其中 $h\times w=n$，STC Connector 的时空下采样可以表示为：
+
+\begin{equation}
+    \label{equ:stc_downsample}
+    t'=\frac{t}{r_t},\quad h'=\frac{h}{r_s},\quad w'=\frac{w}{r_s}
+\end{equation}
+
+其中，$r_t$ 表示时间维下采样倍率，$r_s$ 表示空间维下采样倍率。经过下采样后，视觉 token 数量由 $t\times h\times w$ 变为：
+
+\begin{equation}
+    \label{equ:stc_token_number}
+    N_{stc}=t'\times h'\times w'
+\end{equation}
+
+STC Connector 的意义在于，它并非简单地将所有帧 token 展平后输入语言模型，而是在进入语言模型之前先对视频视觉特征进行结构化时空融合。这样既能减少后续输入 LLM 的视觉 token 数量，也能保留一定的时空局部结构。
+
+\subsubsection{本文不修改 STC Connector 的原因}
+
+本文以 VideoLLaMA2 为基础框架开展视觉 token 压缩研究。需要注意的是，VideoLLaMA2 中的 STC Connector 已经承担了视频时空建模功能。如果直接替换或大幅修改 STC Connector，可能会破坏原模型已经学习到的时空融合能力，并导致后续大语言模型与视觉连接模块之间的适配关系发生变化。
+
+因此，本文的核心思路并不是重新设计 VideoLLaMA2 的时空建模模块，而是在 STC Connector 之前引入逐帧空间 token 压缩。具体而言，本文将 TokenPacker 的视觉 token 压缩思想迁移到视频场景中，在每一帧内部进行空间 token 聚合，使单帧视觉 token 数量先被压缩，再将压缩后的帧级特征恢复为视频维度并输入 STC Connector。该设计能够在不改变 VideoLLaMA2 原有时空融合结构的前提下，降低 STC Connector 前端的视觉 token 数量，从而减少后续时空建模与 LLM 推理过程中的计算开销。
+
+从结构上看，本文方法与 VideoLLaMA2 原始流程的主要区别在于视觉特征进入 STC Connector 之前增加了帧级空间 token 压缩环节。VideoLLaMA2 原始流程通常先对输入视频进行帧采样，然后利用视觉编码器逐帧提取 patch-level 视觉特征，随后直接将这些帧级视觉特征输入 STC Connector 进行时空融合，最后送入大语言模型完成视频理解与回答生成。
+
+相比之下，本文方法在 Vision Tower 与 STC Connector 之间引入 Frame-level Token Compression 模块。具体而言，视频帧经过视觉编码器后，首先在每一帧内部进行空间视觉 token 压缩，将原始密集 patch token 聚合为数量更少的压缩 token；随后再将压缩后的帧级 token 重新组织为视频时序结构，并输入 VideoLLaMA2 原有的 STC Connector 进行时空建模。这样既能够降低进入 STC Connector 前的视觉 token 数量，又不会改变 VideoLLaMA2 原有的时空融合模块和大语言模型结构。
+
+其中，Frame-level Token Compression 是本文后续章节重点设计的模块。该模块的理论基础来自 TokenPacker，但其迁移方式并不是直接替换 VideoLLaMA2 的连接模块，而是将 TokenPacker 的空间 token 聚合思想改造为逐帧压缩策略，以适配 VideoLLaMA2 中具有时间维度的视频特征结构。
+
+\subsection{TokenPacker 原理}
+
+TokenPacker 是一种面向多模态大模型的高效视觉投影模块，其主要目标是在减少视觉 token 数量的同时，尽可能保留细粒度视觉信息\cite{tokenpacker2024}。传统多模态大模型通常使用 MLP projector 将视觉编码器输出的每个视觉 token 一一映射到语言模型输入空间。该方式虽然能够完整保留视觉 token，但在高分辨率图像或视频场景下会产生大量冗余 token，从而显著增加 LLM 的推理开销。
+
+与简单的 MLP projector 不同，TokenPacker 采用 coarse-to-fine 的 token 压缩思想。其核心设计是先构造低分辨率 point query 表示整体视觉信息，再利用高分辨率、多层级视觉特征作为 region-level key 和 value，通过局部 Cross Attention 将细粒度区域信息注入低分辨率 query 中，从而生成数量更少但信息更丰富的压缩视觉 token。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{background/TokenPacker}
+    \caption{\label{fig:tokenpacker_architecture}TokenPacker 架构示意图\cite{tokenpacker2024}}
+\end{figure}
+
+\subsubsection{Query Token 构建}
+
+TokenPacker 首先对视觉编码器输出的原始特征进行空间下采样，得到低分辨率视觉表示。设原始视觉特征为：
+
+\begin{equation}
+    \label{equ:tokenpacker_input}
+    I_v\in\mathbb{R}^{N\times C}
+\end{equation}
+
+其中，$N$ 表示原始视觉 token 数量，$C$ 表示视觉特征维度。若原始视觉特征对应的二维空间网格大小为 $H_v\times W_v$，则有：
+
+\begin{equation}
+    \label{equ:tokenpacker_grid}
+    N=H_v\times W_v
+\end{equation}
+
+TokenPacker 通过插值下采样得到低分辨率特征：
+
+\begin{equation}
+    \label{equ:tokenpacker_query}
+    I'_v\in\mathbb{R}^{M\times C}
+\end{equation}
+
+其中，$M$ 表示压缩后的 token 数量。若下采样倍率为 $s$，则压缩后 token 数量为：
+
+\begin{equation}
+    \label{equ:tokenpacker_token_number}
+    M=\frac{N}{s^2}
+\end{equation}
+
+因此，TokenPacker 的理论压缩率可表示为：
+
+\begin{equation}
+    \label{equ:tokenpacker_compression_ratio}
+    R=\frac{M}{N}=\frac{1}{s^2}
+\end{equation}
+
+当 $s=2$ 时，视觉 token 数量压缩为原来的 $1/4$；当 $s=3$ 时，压缩为原来的 $1/9$；当 $s=4$ 时，压缩为原来的 $1/16$。低分辨率特征 $I'_v$ 被视为 point query，其作用是提供整体视觉结构和粗粒度语义表示。
+
+\subsubsection{Region-to-Point Cross Attention 压缩}
+
+仅通过插值下采样虽然能够减少 token 数量，但容易损失局部细节。为此，TokenPacker 进一步引入 Region-to-Point Injection 模块，将高分辨率区域特征注入低分辨率 query 中。具体而言，每个低分辨率 point query 对应原始高分辨率特征图中的一个局部区域，该区域包含 $s\times s$ 个原始视觉 token。
+
+对于第 $j$ 个低分辨率 query，其对应的高分辨率局部区域可表示为：
+
+\begin{equation}
+    \label{equ:region_feature}
+    R_j=\{x_{j,1},x_{j,2},\dots,x_{j,s^2}\}
+\end{equation}
+
+其中，$x_{j,k}$ 表示该局部区域内的第 $k$ 个高分辨率视觉 token。TokenPacker 将低分辨率 point token 作为 Query，将对应局部区域中的高分辨率 token 作为 Key 和 Value，通过 Cross Attention 完成局部信息注入：
+
+\begin{equation}
+    \label{equ:tokenpacker_cross_attention}
+    z_j=\mathrm{Softmax}\left(\frac{q_jK_j^T}{\sqrt{d}}\right)V_j
+\end{equation}
+
+其中，$q_j$ 表示第 $j$ 个低分辨率 query，$K_j$ 和 $V_j$ 分别表示其对应局部区域的 key 和 value，$z_j$ 表示更新后的压缩 token。该机制的核心优势在于，它不是从全局范围内任意聚合视觉 token，而是在局部区域中进行 point-to-region 信息交互，使每个压缩 token 能够吸收其对应空间区域内的细粒度信息。
+
+从视觉语义角度看，该过程相当于将一个局部区域中的多个 patch token 打包到一个更紧凑的 token 表示中。因此，TokenPacker 不只是减少 token 数量，而是通过注意力聚合增强压缩 token 的信息密度。
+
+\subsubsection{Multi-Level Feature 融合}
+
+TokenPacker 的另一项关键设计是利用 CLIP 的多层级视觉特征。由于 CLIP 不同层的 hidden states 具有不同的信息偏向，浅层特征通常包含更多低级视觉细节，例如边缘、颜色和纹理；深层特征则更关注目标类别、场景语义和抽象概念。TokenPacker 将多层级 CLIP 特征作为 region-level reference cues，使低分辨率 query 能够从不同语义层次中吸收信息。
+
+设 CLIP 的多层视觉特征表示为：
+
+\begin{equation}
+    \label{equ:multi_level_features}
+    \mathcal{F}=\{F^{(l_1)},F^{(l_2)},\dots,F^{(l_m)}\}
+\end{equation}
+
+其中，$F^{(l_i)}$ 表示第 $l_i$ 层 hidden state，$m$ 表示所选取的层数。TokenPacker 将这些多层特征进行融合后，构造用于 Cross Attention 的 Key 和 Value：
+
+\begin{equation}
+    \label{equ:kv_multi_level}
+    K,V=\phi(F^{(l_1)},F^{(l_2)},\dots,F^{(l_m)})
+\end{equation}
+
+其中，$\phi(\cdot)$ 表示多层特征融合映射。通过这种方式，TokenPacker 能够在压缩 token 数量的同时，尽可能保留局部细节和高层语义信息。
+
+\subsubsection{Token 聚合机制与效率优势}
+
+TokenPacker 的最终输出是一组压缩后的视觉 token：
+
+\begin{equation}
+    \label{equ:tokenpacker_output}
+    T_v=\{z_1,z_2,\dots,z_M\},\quad T_v\in\mathbb{R}^{M\times C}
+\end{equation}
+
+相比原始视觉特征 $I_v\in\mathbb{R}^{N\times C}$，TokenPacker 将 token 数量由 $N$ 降低至 $M$，其中 $M<N$。对于后续大语言模型而言，输入视觉 token 数量减少后，prefill 阶段的注意力计算成本也随之下降。若忽略文本 token 数量变化，仅从视觉 token 角度分析，则注意力计算复杂度可由：
+
+\begin{equation}
+    \label{equ:before_compression_complexity}
+    O(N^2d)
+\end{equation}
+
+降低为：
+
+\begin{equation}
+    \label{equ:after_compression_complexity}
+    O(M^2d)
+\end{equation}
+
+结合式 \ref{equ:tokenpacker_token_number} 可得：
+
+\begin{equation}
+    \label{equ:complexity_ratio}
+    \frac{M^2}{N^2}=\frac{1}{s^4}
+\end{equation}
+
+这说明，当视觉 token 数量按 $1/s^2$ 压缩时，仅从视觉 token 自注意力角度看，理论复杂度可按 $1/s^4$ 的比例下降。虽然在实际多模态大模型中还存在文本 token、投影层、时空连接模块和缓存机制等因素，但视觉 token 数量下降仍然能够显著降低推理阶段的计算开销。
+
+\subsubsection{TokenPacker 向视频场景迁移的问题}
+
+尽管 TokenPacker 在图像多模态任务中能够有效压缩视觉 token，但其原始设计主要面向静态图像场景。若直接将其应用于视频大模型，会面临若干结构适配问题。
+
+首先，视频输入包含显式时间维度。图像 token 压缩只需要处理单帧空间结构，而视频 token 压缩必须同时考虑帧内空间信息和帧间时间信息。如果直接将所有视频帧 token 展平后输入 TokenPacker，可能会破坏原有视频帧顺序，使后续 STC Connector 难以正确建模时间结构。
+
+其次，TokenPacker 原始模块通常作为视觉 projector 直接连接视觉编码器和 LLM，其输出维度可能已经对齐到语言模型隐藏维度。而 VideoLLaMA2 的 STC Connector 位于视觉编码器和 LLM 之间，要求输入仍然保留视频视觉特征维度与时空结构。因此，在本文场景中，TokenPacker 不能简单作为完整 projector 替换 VideoLLaMA2 的连接模块，而应被改造为 STC Connector 之前的帧级空间 token 压缩模块。
+
+再次，VideoLLaMA2 的 STC Connector 已经承担时空融合任务。如果在 TokenPacker 阶段过早融合不同帧之间的信息，可能会与 STC Connector 的时空建模功能产生冲突。因此，本文采用逐帧空间压缩策略，即只在每一帧内部压缩空间 token，而不在 TokenPacker 阶段混合不同帧之间的信息。这样既能利用 TokenPacker 的局部视觉聚合能力，又能保持 VideoLLaMA2 原有的时空建模流程。
+
+综上，TokenPacker 为本文提供了视觉 token 压缩的理论基础，而 VideoLLaMA2 则提供了视频时空建模框架。本文后续章节将在二者基础上设计适用于视频大模型的逐帧空间 token 压缩方案，在不修改 LLM 与 STC Connector 的前提下降低视频视觉 token 数量，并通过 token 校准与轻量微调缓解直接迁移带来的分布适配问题。

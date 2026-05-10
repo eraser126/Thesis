@@ -1,7 +1,52 @@
-\section{项目的主要内容和技术路线}
+\section{论文的主要内容和技术路线}
 
 \subsection{主要研究内容}
 
+围绕上述目标，论文拟完成以下四项主要研究内容。其一，分析 VideoLLaMA2-7B-16F 的视觉分支与 STC connector 工作机制，明确视觉编码器输出形状、STC 输入约束以及原始视频 token 流转路径，作为后续模块插入与维度对齐的基础。其二，基于 TokenPacker 原始设计，将其从图像场景迁移到视频场景，重点完成多层视觉特征拼接、TokenPacker 输出维度调整、视频维度恢复和 wrapper 封装等工作。其三，构建完整的推理实验链路，在不同 scale factor 下比较 token 压缩前后的视频 token 数、推理吞吐、显存占用和任务性能。其四，结合实验结果分析时空联合压缩方案的有效性，归纳适合视频大模型的空间压缩策略。
+
+从论文写作结构看，正文预计包括：绪论与相关工作、VideoLLaMA2 与 TokenPacker 原理分析、TokenPacker 接入 VideoLLaMA2 的模型设计与实现、实验设计与结果分析、总结与展望。其中，本次开题重点对应前两部分的文献综述与方案设计。
+
 \subsection{技术路线}
 
+本课题的技术路线遵循“基线结构分析-TokenPacker 接入设计-接口改造实现-实验评估验证”的思路展开，核心目标是在不改变 VideoLLaMA2-7B-16F 主体推理框架的前提下，将 TokenPacker 作为视觉压缩模块插入到 vision tower 与 STC connector 之间\cite{tokenpacker2024,videollama22024}。
+
+整体数据流严格保持为：video $\to$ frame sampling ($t=16$) $\to$ vision tower $\to$ (single\_features, multi\_features) $\to$ TokenPacker $\to$ reshape 为视频维度 $\to$ STC connector $\to$ LLM。其中，TokenPacker 只负责逐帧空间 token 压缩，不替换 STC，不放置在 STC 之后，也不改动 LLM 解码逻辑，从而保证实验结论能够集中反映“先做空间压缩、再做时空融合”这一设计本身的效果。
+
+第一步是梳理原始 VideoLLaMA2-7B-16F 的视觉编码器接口。原模型对输入视频进行 16 帧采样与逐帧预处理后，经 vision tower 输出帧级 patch 特征，再由 STC connector 进行时空聚合并映射到语言模型输入空间\cite{videollama22024}。为满足 TokenPacker 的双路输入要求，需要首先改造视觉编码器输出：原始单路特征 $(b\times t,n,d)$ 不再直接送入 STC，而是同时返回 single\_features 与 multi\_features 两组张量。其中，single\_features 来自指定单层 hidden state，形状为 $(b\times t,n,d)$，用作 TokenPacker 的 query；multi\_features 来自多层 hidden states 拼接，形状为 $(b\times t,n,4d)$，用作 key/value。实现时可采用类似 layers=[12,16,22,23] 的多层采样策略，以兼顾浅层局部细节与深层语义信息。
+
+第二步是完成 TokenPacker 主体接入与维度适配。按照原始设计，TokenPacker 保留 coarse-to-fine 的 region-to-point 注入思路：先将单层特征插值为低分辨率点查询，再利用多层高分辨率区域特征，通过 \texttt{divide\_feature} 局部块划分、MultiheadAttention 交互和细节注入机制更新粗粒度查询\cite{tokenpacker2024}。为与 VideoLLaMA2 的 STC connector 对接，本研究不改变 TokenPacker 的主体逻辑，但需将原模型中负责“1024 $\to$ LLM hidden size”的末端 MLP 改为 Identity，使 forward 中保留 $x=\texttt{self.mlp}(x)$ 的调用形式，而输出维度仍保持为视觉特征维 $d_{\text{visual}}$。这样，TokenPacker 的输出即为 $(b\times t,n',d)$，其中 $n'=(\text{raw\_grid}/\text{scale\_factor})^2$；raw\_grid 由 $n$ 自动推断为 $\mathrm{int}(\sqrt{n})$，并要满足 raw\_grid \% scale\_factor == 0，否则直接报错。以 $336\times336$ 输入、$24\times24$ patch 网格为例，当 scale\_factor=2 时，每帧 token 数将从 576 压缩到 144，为后续 STC 聚合显著减负。
+
+第三步是完成视频维度恢复与 STC connector 接口对接，实现空间压缩后的视觉 token 在视频时序结构中的重组织与传递。由于 TokenPacker 的设计仅针对逐帧空间 token 压缩，其 forward 输入输出均为展平后的帧级特征形式，即 $(b\times t,n,d)\to(b\times t,n',d)$，因此在模块外部必须显式完成视频维度的恢复与重排，以满足后续时空建模模块的输入要求。首先，在视觉编码器输出双路特征并经 TokenPacker 压缩后，将压缩得到的 packed\_features 按 batch 与时间维重新 reshape 为 $(b,t,n',d)$。该操作需严格在 TokenPacker 外部完成，避免在空间压缩模块内部引入视频逻辑，从而保持模块职责单一与结构清晰。随后，将恢复视频维度后的特征序列直接送入原始 STC connector，其输入接口保持不变，即要求输入张量维度为 $(b,t,n',d)$，其中 $d$ 为视觉隐藏维度（mm\_hidden\_size）。
+
+第四步是开展实验验证与消融分析。实验以原始 VideoLLaMA2-7B-16F 为基线，对比接入 TokenPacker 后在不同 scale\_factor 设置下的模型表现，重点统计四类指标：其一为压缩效果指标，即每帧 token 数与整体视觉 token 数的变化；其二为效率指标，包括单样本推理耗时、吞吐量与显存占用；其三为任务性能指标，包括视频问答准确率、描述质量或小规模验证集得分；其四为综合权衡指标，即压缩率与性能下降之间的平衡关系。若时间允许，还可进一步比较不同 multi\_features 层组合、不同视频长度以及不同场景复杂度下的效果差异，以分析 TokenPacker 在视频场景中的适用边界。
+
+从实现原则上看，本课题采用“结构最小改动”的迁移方案：一方面，保持 TokenPacker 原有的细节注入机制，不将其改写为 pooling、卷积或 STC 替代模块；另一方面，保持 VideoLLaMA2 的 STC connector、LLM forward、tokenizer 逻辑及损失计算方式不变，仅在视觉分支新增双路特征输出、wrapper 与局部接口改造\cite{tokenpacker2024,videollama22024}。这种做法既能降低工程接入风险，又能使实验结果更直接地反映 TokenPacker 迁移到视频大模型后的真实收益与局限。
+
+\begin{table}[H]
+    \centering
+    \small
+    \renewcommand{\arraystretch}{1.15}
+    \caption{本课题拟采用的模型改造流程}
+    \begin{tabularx}{\textwidth}{p{0.15\textwidth}p{0.25\textwidth}XX}
+        \toprule
+        阶段 & 输入/输出 & 关键操作 & 目标 \\
+        \midrule
+        阶段1：视觉编码 & video $\to$ frames $\to$ $(b\times t,n,d)$ & 16 帧采样、逐帧 CLIP 编码 & 获得原始帧级 patch 特征 \\
+        阶段2：双路特征构建 & $(b\times t,n,d)$ $\to$ single features / multi features & 提取单层 hidden state 与多层拼接 hidden states & 为 TokenPacker 构造 query 与 key/value \\
+        阶段3：逐帧空间压缩 & $(b\times t,n,d)+(b\times t,n,4d)$ $\to$ $(b\times t,n',d)$ & 使用 TokenPacker 完成 coarse-to-fine 压缩 & 减少每帧空间 token 数量 \\
+        阶段4：视频维恢复 & $(b\times t,n',d)$ $\to$ $(b,t,n',d)$ & wrapper 外部 reshape & 满足 STC connector 输入约束 \\
+        阶段5：时空融合 & $(b,t,n',d)$ $\to$ $(b,L,D_{\text{llm}})$ & 保持原 STC connector 不变 & 完成时空聚合并送入 LLM \\
+        阶段6：实验评估 & 性能指标与效率指标 & 比较压缩前后准确率、耗时、显存 & 验证时空联合压缩有效性 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+从创新实现角度看，本课题并不试图重新设计一种全新的视频连接器，而是采用“结构最小改动”的迁移策略：一方面，保持 TokenPacker 的原始细节注入机制不变，避免把其改写为 pooling、卷积或 STC 替代模块；另一方面，保持 STC connector 主体与 LLM 前向逻辑不变，确保实验结论可以更集中地反映“逐帧空间压缩”这一变量本身。
+
 \subsection{可行性分析}
+
+本课题具有较好的理论可行性。首先，TokenPacker 和 VideoLLaMA2 在模块定位上天然兼容：前者本质是视觉投影器或视觉压缩模块，后者在视觉编码器与 LLM 之间引入了显式连接器，因此在 vision tower 与 STC 之间插入 TokenPacker 具有明确的接口意义\cite{tokenpacker2024,videollama22024}。其次，技术文档已对输入输出形状、输出维度修改、视频维恢复和禁止改动模块给出清晰约束，能够有效降低接入过程中因架构理解偏差带来的试错成本。
+
+本课题具有较好的工程可行性。其一，研究对象聚焦在 VideoLLaMA2-7B-16F 的视觉分支，避免了重训完整视频大模型的过高成本；其二，TokenPacker 插入位置明确、改动边界清晰，可通过新增 wrapper 与局部修改 \texttt{encode\_images\_or\_videos()} 函数完成；其三，本研究可以先基于预训练权重做推理级验证或小规模微调验证，符合本科毕设时间与算力条件。
+
+本课题还具有较好的实验可行性。评价指标可以划分为三类：效率指标，包括视觉 token 数量、单样本推理耗时、吞吐量和显存占用；效果指标，包括视频问答准确率、描述质量或若干小规模验证集性能；综合指标，包括压缩率与性能下降之间的权衡。实验变量也较清晰，至少可设置“原始 VideoLLaMA2 基线”“接入 TokenPacker 后的不同 scale factor 方案”两组主对比，并视时间增加消融实验，如单层特征与多层特征对比、不同多层特征组合对比等。
