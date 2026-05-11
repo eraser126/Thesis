@@ -1,0 +1,486 @@
+\cleardoublepage
+
+\section{方案设计}
+
+\par 本章围绕视频大模型推理阶段的视觉 token 冗余问题，介绍本文在 VideoLLaMA2 框架中引入 TokenPacker 的整体方案。VideoLLaMA2 通过视觉编码器提取视频帧特征，并利用 STC Connector 完成时空融合，再将压缩后的视觉表示输入大语言模型进行生成式推理\cite{videollama22024}。该结构具有较强的视频理解能力，但在输入帧数较多或视觉分辨率较高时，每帧产生的大量 patch token 会显著增加后续 STC 模块与语言模型 prefill 阶段的计算负担。为降低视觉 token 数量，本文参考 TokenPacker 中基于 query token 与 cross attention 的视觉 token 聚合思想\cite{tokenpacker2024}，在不修改视觉编码器、STC Connector 与 LLM 主体结构的前提下，设计了一种面向视频输入的逐帧空间 token 压缩方案。
+
+\par 与原始 TokenPacker 直接作为图像多模态大模型视觉投影器的用法不同，本文的核心目标不是替换 VideoLLaMA2 中已有的视觉-语言连接器，而是在视觉编码器输出与 STC Connector 输入之间插入轻量压缩模块。该设计使压缩模块只负责减少每一帧的空间 token 数量，同时保留 VideoLLaMA2 原有的时间维建模流程。具体而言，本文将视频输入划分为帧序列，经 CLIP 视觉编码器得到单层视觉特征与多层融合特征，再通过改造后的 TokenPacker 对每一帧独立执行空间压缩，最后将压缩后的帧级 token 重新组织为 STC Connector 可接收的视频张量。
+
+\subsection{整体架构设计}
+
+\par 本文方法的整体流程可以表示为：
+
+\begin{equation}
+    \label{equ:method-pipeline}
+    \mathrm{video}
+    \rightarrow
+    \mathrm{frame\ sampling}
+    \rightarrow
+    \mathrm{vision\ tower}
+    \rightarrow
+    \mathrm{TokenPacker}
+    \rightarrow
+    \mathrm{STC\ connector}
+    \rightarrow
+    \mathrm{LLM}.
+\end{equation}
+
+\par 在该流程中，视频首先被均匀采样为固定长度的帧序列。对于一段视频，设 batch size 为 $B$，采样帧数为 $T$，图像通道数为 $C$，输入分辨率为 $H \times W$，则预处理后的视频张量为
+
+\begin{equation}
+    \label{equ:method-video-input}
+    \mathbf{V} \in \mathbb{R}^{B \times T \times C \times H \times W}.
+\end{equation}
+
+\par 在实际实现中，VideoLLaMA2 会先将时间维与 batch 维合并，将输入重排为 $(BT) \times C \times H \times W$ 后送入视觉编码器。视觉编码器输出两类特征：一类是选定层的 patch token，记为 \texttt{single\_features}；另一类是多个 hidden states 拼接后的多层特征，记为 \texttt{multi\_features}。随后，本文在 STC Connector 之前插入 \texttt{VideoTokenPackerWrapper}，将帧级张量展平为 $(BT) \times N \times D$ 后调用 TokenPacker 进行空间压缩，并在压缩完成后重新恢复为 $B \times T \times N_c \times D$ 的视频特征格式。这里 $N$ 表示原始每帧 patch token 数量，$N_c$ 表示压缩后的每帧 token 数量。
+
+\begin{table}[ht]
+    \caption{\label{tab:method-module-io}本文方法中主要模块的输入输出形式}
+    \begin{tabularx}{\linewidth}{|c|X<{\centering}|X<{\centering}|}
+        \hline
+        模块 & 输入 & 输出 \\ \hline
+        帧采样 & 原始视频 & $\mathbf{V}\in\mathbb{R}^{B\times T\times C\times H\times W}$ \\ \hline
+        视觉编码器 & $(BT)\times C\times H\times W$ & $\mathbf{X}\in\mathbb{R}^{B\times T\times N\times D}$，$\mathbf{M}\in\mathbb{R}^{B\times T\times N\times 4D}$ \\ \hline
+        TokenPacker & $\mathbf{X}$，$\mathbf{M}$ & $\hat{\mathbf{X}}\in\mathbb{R}^{B\times T\times N_c\times D}$ \\ \hline
+        STC Connector & $\hat{\mathbf{X}}$ & $\mathbf{Z}\in\mathbb{R}^{B\times L_v\times D_l}$ \\ \hline
+        LLM Decoder & 文本 token 与视觉 token & 生成式回答 \\ \hline
+    \end{tabularx}
+\end{table}
+
+\par 压缩位置的选择是本文方案的关键。若在视觉编码器之前压缩视频帧，模型会丢失原始图像细节，且无法复用已有视觉编码器权重；若在 STC Connector 之后压缩，则时空融合模块仍需处理完整的帧级 patch token，无法有效降低 STC 的计算开销。本文将 TokenPacker 插入到视觉编码器之后、STC Connector 之前，使其能够直接作用于高维视觉 token，并在进入 STC 之前减少空间 token 数量。这样既能够降低后续时空融合与 LLM prefill 的开销，又避免破坏 VideoLLaMA2 已有的时间维处理逻辑。
+
+\subsection{视频视觉特征构建}
+
+\par 本文基于 VideoLLaMA2 的视频预处理与视觉编码流程构建帧级视觉特征。对于输入视频，系统首先根据设定的 \texttt{num\_frames} 进行均匀采样。设原视频包含 $T_0$ 帧，目标采样帧数为 $T$，则均匀采样过程可近似表示为将视频时间轴划分为 $T$ 个片段，并从每个片段中选取中心附近的帧作为输入。该策略能够在保持固定计算预算的同时覆盖完整视频时间范围，是视频大模型常用的输入构建方式。
+
+\par 采样后的每帧图像输入 CLIP 视觉编码器。CLIP 通过图像-文本对比学习获得较强的跨模态视觉表示能力\cite{clip2021}，其视觉侧通常采用 Vision Transformer 结构，将图像划分为规则 patch 并编码为 token 序列\cite{vit2021}。在本文使用的 CLIP ViT-L/14-336 设置中，输入分辨率为 $336 \times 336$，patch size 为 $14$，因此每帧对应的空间网格大小为
+
+\begin{equation}
+    \label{equ:method-raw-grid}
+    G = \frac{336}{14}=24,\quad N = G^2 = 576.
+\end{equation}
+
+\par 视觉编码器前向传播时输出所有 hidden states。本文从指定层提取单层 patch token 作为主视觉特征：
+
+\begin{equation}
+    \label{equ:method-single-feature}
+    \mathbf{X} \in \mathbb{R}^{B \times T \times N \times D},
+\end{equation}
+
+\par 其中 $D$ 为视觉编码器 hidden size。对于 CLIP ViT-L/14-336，$D=1024$。同时，本文选取多个中高层 hidden states 并在通道维拼接，构造多层视觉特征：
+
+\begin{equation}
+    \label{equ:method-multi-feature}
+    \mathbf{M} = \mathrm{Concat}(\mathbf{H}_{l_1},\mathbf{H}_{l_2},\mathbf{H}_{l_3},\mathbf{H}_{l_4})
+    \in \mathbb{R}^{B \times T \times N \times 4D}.
+\end{equation}
+
+\par 在代码实现中，CLIP 视觉塔默认选取第 $12$、$16$、$22$、$23$ 层 hidden states 构建 \texttt{multi\_features}。其中，\texttt{single\_features} 保留当前层的局部视觉语义，\texttt{multi\_features} 则融合不同层级的语义抽象与细节信息。本文在 TokenPacker 中使用 \texttt{single\_features} 生成 query token，使用 \texttt{multi\_features} 生成 key 与 value，使压缩过程同时利用当前层空间结构与多层视觉表征。
+
+\par 从张量形状看，视频视觉特征构建过程如下：
+
+\begin{equation}
+    \label{equ:method-shape-flow}
+    B\times T\times C\times H\times W
+    \rightarrow
+    (BT)\times C\times H\times W
+    \rightarrow
+    (BT)\times N\times D
+    \rightarrow
+    B\times T\times N\times D.
+\end{equation}
+
+\par 该过程保留了帧序列的时间顺序，同时将视觉编码阶段统一为图像级前向传播，从而能够复用已有 CLIP 权重和 VideoLLaMA2 视觉塔实现。由于每帧都会产生 $N$ 个 patch token，原始视频在进入 STC Connector 前的视觉 token 总数为
+
+\begin{equation}
+    \label{equ:method-raw-token-count}
+    N_{\mathrm{raw}} = T \cdot G^2.
+\end{equation}
+
+\par 以 $T=16$、$G=24$ 为例，单个视频样本在 STC Connector 之前包含 $16\times 576=9216$ 个空间视觉 token。该数量会随采样帧数和输入分辨率线性或平方增长，是视频大模型推理开销的重要来源。
+
+\subsection{TokenPacker 视频迁移方案}
+
+\subsubsection{直接迁移存在的问题}
+
+\par TokenPacker 原本面向图像多模态大模型设计，其目标是将图像视觉 token 通过可学习的注意力聚合压缩为较少数量的视觉 token，再作为视觉投影器输出到后端语言模型\cite{tokenpacker2024}。然而，VideoLLaMA2 的视频建模流程与图像多模态模型存在明显差异，直接照搬原始 TokenPacker 模块会带来三个问题。
+
+\par 首先，视频输入具有显式时间维。VideoLLaMA2 中 STC Connector 需要接收形如 $B\times T\times N\times D$ 的帧级特征，并在时间维与空间维上进行联合建模。如果将所有帧的 token 直接作为一个长序列输入原始 TokenPacker，压缩模块会混合不同帧之间的 token，破坏 STC Connector 所依赖的帧结构。这样不仅会使时间顺序难以恢复，也会导致 STC 的输入张量形状与原模型不匹配。
+
+\par 其次，原始 TokenPacker 通常同时承担视觉 token 压缩与视觉-语言维度投影功能，其输出维度面向 LLM hidden size。VideoLLaMA2 中已有 STC Connector 负责视觉-语言连接，并且 STC 的输入 hidden size 应与视觉编码器输出维度一致。因此，如果直接加载原始 TokenPacker 的完整 projector，输出维度会与 STC Connector 的输入维度不一致，无法直接接入 VideoLLaMA2。
+
+\par 最后，VideoLLaMA2 的 checkpoint 已经包含训练好的 STC Connector 与 LLM 参数。若替换 STC 或修改 LLM 输入结构，需要重新进行大规模跨模态对齐训练，工程成本较高，也会引入额外变量。本文的目标是在尽量保持原模型行为的前提下降低视觉 token 数量，因此迁移方案必须限定在局部模块内，避免改变后端模型主体。
+
+\subsubsection{本文设计原则}
+
+\par 针对上述问题，本文采用以下设计原则。
+
+\par 第一，不修改 LLM。压缩后的视觉 token 仍由原有多模态输入拼接逻辑插入文本 token 序列，语言模型结构、词表和生成过程均保持不变。这样可以最大限度复用 VideoLLaMA2 的语言理解与指令跟随能力。
+
+\par 第二，不替换 STC Connector。STC Connector 已经承担 VideoLLaMA2 中的时空融合和视觉-语言对齐功能\cite{videollama22024}。本文只改变其输入 token 数量，不改变其结构和调用方式，使压缩模块成为前置的帧级空间压缩器。
+
+\par 第三，不完整照搬原始 TokenPacker projector，而是仅迁移其视觉 token 聚合核心。具体而言，本文保留 query projection、key projection、value projection、layer normalization 与 multi-head attention 等核心权重，去除原始面向 LLM hidden size 的输出 MLP，并使用 identity 映射保持输出维度为视觉特征维度 $D$。这一修改使 TokenPacker 的输出可以直接作为 STC Connector 的输入。
+
+\subsubsection{逐帧空间压缩流程}
+
+\par 本文将 TokenPacker 改造为帧级空间 token 压缩器。对于每一帧，设单层视觉特征为
+
+\begin{equation}
+    \label{equ:method-tokenpacker-input-single}
+    \mathbf{X}_t \in \mathbb{R}^{N \times D},
+\end{equation}
+
+\par 多层视觉特征为
+
+\begin{equation}
+    \label{equ:method-tokenpacker-input-multi}
+    \mathbf{M}_t \in \mathbb{R}^{N \times 4D}.
+\end{equation}
+
+\par 给定空间压缩尺度 $s$，原始 $G\times G$ 网格被压缩为 $G_c\times G_c$ 网格，其中
+
+\begin{equation}
+    \label{equ:method-compressed-grid}
+    G_c = \frac{G_p}{s}, \quad
+    G_p = \left\lceil \frac{G}{s} \right\rceil s.
+\end{equation}
+
+\par 当 $G$ 不能被 $s$ 整除时，本文实现支持将空间网格复制填充到 $G_p\times G_p$ 后再压缩；在 CLIP ViT-L/14-336 的主要实验设置中，$G=24$，对于 $s=2,3,4$ 均无需额外填充。
+
+\par TokenPacker 首先从单层特征构建 query token。实现中将 $\mathbf{X}_t$ 恢复为 $G\times G$ 的空间网格，并通过双线性插值生成 $G_c\times G_c$ 的低分辨率 query 网格：
+
+\begin{equation}
+    \label{equ:method-query}
+    \mathbf{Q}_t =
+    \mathrm{LN}_q
+    \left(
+        W_q \cdot
+        \mathrm{Interp}_{G_c\times G_c}(\mathbf{X}_t)
+    \right),
+    \quad
+    \mathbf{Q}_t \in \mathbb{R}^{N_c\times D}.
+\end{equation}
+
+\par 其中 $N_c=G_c^2$。随后，TokenPacker 从多层特征中生成 key 与 value：
+
+\begin{equation}
+    \label{equ:method-key-value}
+    \mathbf{K}_t = \mathrm{LN}_k(f_k(\mathbf{M}_t)),\quad
+    \mathbf{V}_t = \mathrm{LN}_v(f_v(\mathbf{M}_t)),
+\end{equation}
+
+\par 其中 $f_k$ 与 $f_v$ 均为两层线性变换与 GELU 激活组成的轻量映射。接着，原始 $G_p\times G_p$ 空间网格被划分为 $N_c$ 个互不重叠的 $s\times s$ 局部区域。对于第 $i$ 个压缩位置，记其对应的原始局部区域为 $\Omega_i$，则输出 token 由局部 cross attention 得到：
+
+\begin{equation}
+    \label{equ:method-local-attention}
+    \hat{\mathbf{x}}_{t,i}
+    =
+    \mathrm{MHA}
+    \left(
+        \mathbf{q}_{t,i},
+        \mathbf{K}_{t,\Omega_i},
+        \mathbf{V}_{t,\Omega_i}
+    \right).
+\end{equation}
+
+\par 该设计使每个压缩 token 只关注其对应空间邻域内的原始 patch token，既降低注意力计算范围，又保留局部空间结构。与简单平均池化不同，TokenPacker 的注意力权重是可学习的，可以根据视觉内容自适应地聚合区域内更重要的 token。最终，每帧输出为
+
+\begin{equation}
+    \label{equ:method-tokenpacker-output}
+    \hat{\mathbf{X}}_t
+    =
+    \{\hat{\mathbf{x}}_{t,1},\hat{\mathbf{x}}_{t,2},\ldots,\hat{\mathbf{x}}_{t,N_c}\}
+    \in \mathbb{R}^{N_c\times D}.
+\end{equation}
+
+\par 在视频维度上，本文并不在 TokenPacker 内部混合不同帧，而是使用 wrapper 将 $B\times T\times N\times D$ 展平为 $(BT)\times N\times D$，对每一帧独立压缩，再恢复为
+
+\begin{equation}
+    \label{equ:method-video-tokenpacker-output}
+    \hat{\mathbf{X}}
+    \in
+    \mathbb{R}^{B\times T\times N_c\times D}.
+\end{equation}
+
+\par 因此，本文方法可以被理解为 frame-level spatial compression：压缩发生在每一帧的空间维度上，时间维结构被完整保留，并继续交由 STC Connector 进行时空融合。
+
+\begin{algorithm}[ht]
+    \caption{\label{alg:video-tokenpacker}基于 TokenPacker 的视频视觉 token 压缩流程}
+    \begin{algorithmic}[1]
+        \REQUIRE 单层视觉特征 $\mathbf{X}\in\mathbb{R}^{B\times T\times N\times D}$，多层视觉特征 $\mathbf{M}\in\mathbb{R}^{B\times T\times N\times 4D}$，空间压缩尺度 $s$
+        \ENSURE 压缩后视频特征 $\hat{\mathbf{X}}\in\mathbb{R}^{B\times T\times N_c\times D}$
+        \STATE 将时间维与 batch 维合并：$\mathbf{X}'\leftarrow \mathrm{Reshape}(\mathbf{X}, BT,N,D)$
+        \STATE 将多层特征同步展平：$\mathbf{M}'\leftarrow \mathrm{Reshape}(\mathbf{M}, BT,N,4D)$
+        \STATE 根据 $s$ 计算压缩后空间网格 $G_c$，并令 $N_c=G_c^2$
+        \STATE 由 $\mathbf{X}'$ 插值生成低分辨率 query token
+        \STATE 由 $\mathbf{M}'$ 经过线性映射生成 key token 与 value token
+        \FOR{每个压缩位置 $i=1,2,\ldots,N_c$}
+            \STATE 确定其对应的 $s\times s$ 局部空间区域 $\Omega_i$
+            \STATE 使用 query 对区域 $\Omega_i$ 内的 key/value 执行 cross attention
+            \STATE 得到压缩 token $\hat{\mathbf{x}}_i$
+        \ENDFOR
+        \STATE 得到逐帧压缩特征 $\hat{\mathbf{X}}'\in\mathbb{R}^{BT\times N_c\times D}$
+        \STATE 恢复视频维度：$\hat{\mathbf{X}}\leftarrow \mathrm{Reshape}(\hat{\mathbf{X}}', B,T,N_c,D)$
+        \STATE \textbf{return} $\hat{\mathbf{X}}$
+    \end{algorithmic}
+\end{algorithm}
+
+\subsection{Token 维度对齐与结构优化}
+
+\par 将 TokenPacker 迁移到 VideoLLaMA2 的关键工程问题在于维度对齐。原始 VideoLLaMA2 的 STC Connector 接收 $B\times T\times N\times D$ 的视觉特征，其中 $D$ 为视觉编码器 hidden size。压缩后，本文仅改变空间 token 数量，将 $N$ 替换为 $N_c$，而不改变通道维：
+
+\begin{equation}
+    \label{equ:method-dim-align}
+    B\times T\times N\times D
+    \rightarrow
+    B\times T\times N_c\times D.
+\end{equation}
+
+\par 这种维度设计具有两点好处。首先，STC Connector 的输入通道数保持不变，因此不需要重新定义 STC 中的卷积层、RegStage 模块或 readout MLP。其次，LLM hidden size 的对齐仍由原有 STC Connector 完成，压缩模块不需要承担跨模态投影功能，从而降低了迁移风险。
+
+\par 在具体实现中，本文对 TokenPacker 的输出层进行了结构优化。原始 TokenPacker checkpoint 中的部分 MLP 权重面向 LLM hidden size 输出，不能直接用于 VideoLLaMA2 的 STC 输入。本文将该 MLP 替换为 identity 映射：
+
+\begin{equation}
+    \label{equ:method-identity-mlp}
+    \mathrm{MLP}_{\mathrm{out}}(\hat{\mathbf{X}}) = \hat{\mathbf{X}}.
+\end{equation}
+
+\par 因此，TokenPacker 输出仍为 $D$ 维视觉特征。权重迁移时，本文只提取原始 TokenPacker 中与压缩注意力相关的核心参数，包括 $W_q$、$f_k$、$f_v$、query/key/value normalization 以及 multi-head attention 参数，而跳过输出 MLP。该策略保留了 TokenPacker 已学习到的局部 token 聚合能力，同时避免了输出维度与 STC Connector 不兼容的问题。
+
+\par 设原始每帧 token 数为 $N=G^2$，压缩后每帧 token 数为
+
+\begin{equation}
+    \label{equ:method-compressed-token-count}
+    N_c = G_c^2 =
+    \left(\frac{\left\lceil G/s \right\rceil s}{s}\right)^2.
+\end{equation}
+
+\par 当 $G$ 能被 $s$ 整除时，上式可简化为
+
+\begin{equation}
+    \label{equ:method-compressed-token-count-simple}
+    N_c = \left(\frac{G}{s}\right)^2.
+\end{equation}
+
+\par 本文定义视觉 token 保留率 $\rho$ 与压缩倍率 $r$ 分别为
+
+\begin{equation}
+    \label{equ:method-compression-ratio}
+    \rho = \frac{T N_c}{T N} = \frac{N_c}{N},\quad
+    r = \frac{1}{\rho} = \frac{N}{N_c}.
+\end{equation}
+
+\par 在 CLIP ViT-L/14-336 与 $T=16$ 的默认设置下，不同 \texttt{scale\_factor} 对应的 token 数量如\autoref{tab:method-token-budget}所示。
+
+\begin{table}[ht]
+    \caption{\label{tab:method-token-budget}不同压缩尺度下 STC 前视觉 token 数量}
+    \begin{tabularx}{\linewidth}{|c|c|c|c|c|}
+        \hline
+        \texttt{scale\_factor} & 每帧网格 & 每帧 token 数 & 视频总 token 数 & token 保留率 \\ \hline
+        未压缩 & $24\times24$ & $576$ & $9216$ & $100\%$ \\ \hline
+        $2$ & $12\times12$ & $144$ & $2304$ & $25.00\%$ \\ \hline
+        $3$ & $8\times8$ & $64$ & $1024$ & $11.11\%$ \\ \hline
+        $4$ & $6\times6$ & $36$ & $576$ & $6.25\%$ \\ \hline
+    \end{tabularx}
+\end{table}
+
+\par 需要注意的是，本文的 \texttt{scale\_factor} 表示空间边长方向的缩放比例，而不是最终 token 数量的线性缩减比例。由于视觉 token 来自二维空间网格，最终 token 数量近似按 $s^2$ 倍减少。例如，当 $s=4$ 时，每帧 token 数由 $576$ 降至 $36$，对应 $16$ 倍的空间 token 压缩。
+
+\subsection{Token 校准与轻量微调策略}
+
+\par 直接迁移 TokenPacker 后，虽然视觉 token 数量显著下降，但压缩模块会改变原始视觉 token 的分布。VideoLLaMA2 的 STC Connector 与 LLM checkpoint 是在未压缩视觉 token 分布上训练得到的，如果压缩后的 token 在尺度、方向或统计分布上偏离原始特征，后端模型容易出现适配性下降。为缓解该问题，本文设计了 token 校准与轻量微调两阶段优化策略：前者主要解决分布适配问题，后者主要解决任务适应问题。
+
+\subsubsection{Token 校准}
+
+\par Token 校准阶段不修改视觉编码器、STC Connector 与 LLM，只训练 TokenPacker 参数；在需要进一步适配时，也可以选择性地训练 STC Connector 中的视觉投影参数。校准过程以原始未压缩模型作为 teacher，以插入 TokenPacker 后的压缩模型作为 student。对于同一段视频，teacher 分支关闭压缩模块，得到原始视觉特征经过 STC 后的输出：
+
+\begin{equation}
+    \label{equ:method-teacher-feature}
+    \mathbf{Z}^{\mathrm{tea}}
+    =
+    \mathrm{STC}(\mathbf{X}),
+\end{equation}
+
+\par student 分支启用 TokenPacker，得到压缩后再经过 STC 的输出：
+
+\begin{equation}
+    \label{equ:method-student-feature}
+    \mathbf{Z}^{\mathrm{stu}}
+    =
+    \mathrm{STC}(\mathrm{TP}(\mathbf{X},\mathbf{M})).
+\end{equation}
+
+\par 由于压缩会改变 STC 输出序列长度，本文在校准损失中不只使用逐 token 对齐，而是同时引入全局语义方向和统计分布约束。全局方向损失定义为
+
+\begin{equation}
+    \label{equ:method-global-loss}
+    \mathcal{L}_{\mathrm{global}}
+    =
+    1 -
+    \cos
+    \left(
+        \mathrm{Mean}(\mathbf{Z}^{\mathrm{stu}}),
+        \mathrm{Mean}(\mathbf{Z}^{\mathrm{tea}})
+    \right).
+\end{equation}
+
+\par 统计分布损失定义为
+
+\begin{equation}
+    \label{equ:method-stat-loss}
+    \mathcal{L}_{\mathrm{stat}}
+    =
+    \left\|
+        \mu(\mathbf{Z}^{\mathrm{stu}}) -
+        \mu(\mathbf{Z}^{\mathrm{tea}})
+    \right\|_2^2
+    +
+    \left\|
+        \sigma(\mathbf{Z}^{\mathrm{stu}}) -
+        \sigma(\mathbf{Z}^{\mathrm{tea}})
+    \right\|_2^2.
+\end{equation}
+
+\par 其中 $\mu(\cdot)$ 和 $\sigma(\cdot)$ 分别表示序列维上的均值与标准差。该损失鼓励压缩后的视觉表示在整体语义方向和一阶、二阶统计量上接近原模型，从而缓解 distribution shift。
+
+\par 在更细粒度的校准设置中，本文还引入 Mean Pooling token 作为 pre-projector 层面的 teacher。Mean Pooling 不含可学习参数，其输出通常与原始视觉 token 分布更加接近，因此可作为分布保持型压缩目标。设 $\mathrm{MP}(\mathbf{X})$ 表示与 TokenPacker 使用相同 token budget 的局部平均池化结果，则 pre-projector token loss 定义为
+
+\begin{equation}
+    \label{equ:method-pre-token-loss}
+    \mathcal{L}_{\mathrm{token}}
+    =
+    \left\|
+        \mathrm{TP}(\mathbf{X},\mathbf{M}) -
+        \mathrm{MP}(\mathbf{X})
+    \right\|_2^2
+    +
+    1-\cos
+    \left(
+        \mathrm{TP}(\mathbf{X},\mathbf{M}),
+        \mathrm{MP}(\mathbf{X})
+    \right).
+\end{equation}
+
+\par 综合上述约束，校准阶段的目标函数可以写为
+
+\begin{equation}
+    \label{equ:method-calibration-loss}
+    \mathcal{L}_{\mathrm{calib}}
+    =
+    \mathcal{L}_{\mathrm{global}}
+    +
+    \lambda_{\mathrm{stat}}\mathcal{L}_{\mathrm{stat}}
+    +
+    \lambda_{\mathrm{token}}\mathcal{L}_{\mathrm{token}}.
+\end{equation}
+
+\par 实现中，无标签校准数据由 MVBench 视频集合抽样得到\cite{mvbench2024}，训练时冻结主模型，仅更新 TokenPacker。该阶段不依赖人工问答标注，因此可以较低成本完成压缩模块与 VideoLLaMA2 后端的初步适配。
+
+\begin{algorithm}[ht]
+    \caption{\label{alg:token-calibration-finetune}Token 校准与轻量微调训练流程}
+    \begin{algorithmic}[1]
+        \REQUIRE 未压缩 VideoLLaMA2 模型 $F_{\mathrm{base}}$，插入 TokenPacker 的压缩模型 $F_{\mathrm{comp}}$，无标签视频集合 $\mathcal{D}_{u}$，监督问答集合 $\mathcal{D}_{s}$
+        \ENSURE 适配后的 TokenPacker 参数 $\theta_{\mathrm{TP}}$
+        \STATE 冻结视觉编码器、STC Connector 与 LLM 参数，仅令 $\theta_{\mathrm{TP}}$ 可训练
+        \FOR{视频样本 $v\in\mathcal{D}_{u}$}
+            \STATE 关闭 TokenPacker，使用 $F_{\mathrm{base}}$ 得到 teacher 表示 $\mathbf{Z}^{\mathrm{tea}}$
+            \STATE 启用 TokenPacker，使用 $F_{\mathrm{comp}}$ 得到 student 表示 $\mathbf{Z}^{\mathrm{stu}}$
+            \STATE 计算全局方向损失 $\mathcal{L}_{\mathrm{global}}$
+            \STATE 计算统计分布损失 $\mathcal{L}_{\mathrm{stat}}$
+            \STATE 可选地使用 Mean Pooling teacher 计算 token 对齐损失 $\mathcal{L}_{\mathrm{token}}$
+            \STATE 最小化 $\mathcal{L}_{\mathrm{calib}}$ 并更新 $\theta_{\mathrm{TP}}$
+        \ENDFOR
+        \FOR{监督样本 $(v,q,\mathcal{A},y)\in\mathcal{D}_{s}$}
+            \STATE 使用压缩模型得到候选答案 logits $\mathbf{o}$
+            \STATE 根据正确答案 $y$ 计算交叉熵损失 $\mathcal{L}_{\mathrm{ft}}$
+            \STATE 可选地加入未压缩模型候选分布的 KL 蒸馏损失 $\mathcal{L}_{\mathrm{KL}}$
+            \STATE 更新 $\theta_{\mathrm{TP}}$，使压缩 token 适应下游视频问答任务
+        \ENDFOR
+        \STATE \textbf{return} $\theta_{\mathrm{TP}}$
+    \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{轻量微调}
+
+\par Token 校准主要约束视觉表示的分布相似性，但视频问答任务最终评价的是模型对候选答案或自然语言回答的预测能力。因此，本文进一步设计轻量监督微调阶段，使压缩后的 token 更适应下游视频理解任务。
+
+\par 轻量微调使用 MVBench 风格的多选问答样本。对于每个样本，输入由视频、问题和候选答案组成，模型根据视频内容预测选项字母。训练时仍冻结视觉编码器、STC Connector 与 LLM，只更新 TokenPacker 参数。设候选答案集合为 $\mathcal{A}$，正确答案索引为 $y$，模型在答案 token 上得到的 logits 为 $\mathbf{o}\in\mathbb{R}^{|\mathcal{A}|}$，则监督微调损失为
+
+\begin{equation}
+    \label{equ:method-finetune-loss}
+    \mathcal{L}_{\mathrm{ft}}
+    =
+    -\log
+    \frac{\exp(o_y)}
+    {\sum_{a\in\mathcal{A}}\exp(o_a)}.
+\end{equation}
+
+\par 该训练目标直接作用于任务输出，使 TokenPacker 在保持压缩率的同时学习哪些局部视觉信息更有利于回答视频问题。由于训练参数仅限于压缩模块，轻量微调的显存和训练成本远低于全模型微调，也避免了对 LLM 语言能力造成明显扰动。
+
+\par 在扩展设置中，本文还支持使用 teacher 模型的候选答案分布进行 KL 蒸馏。设未压缩模型输出的候选分布为 $\mathbf{p}^{\mathrm{tea}}$，压缩模型输出为 $\mathbf{p}^{\mathrm{stu}}$，则可加入
+
+\begin{equation}
+    \label{equ:method-choice-kl}
+    \mathcal{L}_{\mathrm{KL}}
+    =
+    \mathrm{KL}
+    \left(
+        \mathbf{p}^{\mathrm{tea}}
+        \Vert
+        \mathbf{p}^{\mathrm{stu}}
+    \right).
+\end{equation}
+
+\par 该损失使压缩模型不仅拟合硬标签，还学习未压缩模型在候选答案之间的相对偏好。总体而言，校准阶段解决压缩 token 与原模型后端之间的分布适配问题，轻量微调阶段进一步提升压缩模型在具体视频理解任务上的决策能力。
+
+\subsection{推理复杂度分析}
+
+\par 本文方法主要降低视觉 token 进入 STC Connector 之前的数量，并进一步减少后续传入 LLM 的视觉 token 长度。对于 Transformer 结构而言，自注意力计算复杂度与序列长度平方相关\cite{transformer2017}。在多模态推理中，视觉 token 会作为前缀或插入 token 参与语言模型 prefill，因此视觉 token 数量减少能够直接降低 prefill 阶段的计算与显存压力。
+
+\par 设文本 token 长度为 $L_q$，进入 LLM 的视觉 token 长度为 $L_v$，语言模型 hidden size 为 $D_l$，则单层自注意力的主要复杂度可近似表示为
+
+\begin{equation}
+    \label{equ:method-llm-complexity}
+    \mathcal{O}
+    \left(
+        (L_q+L_v)^2 D_l
+    \right).
+\end{equation}
+
+\par 压缩模块通过减少 STC 输入的空间 token 数，使 STC 输出的视觉序列长度 $L_v$ 随之下降。由于 $L_q$ 在同一任务中基本固定，降低 $L_v$ 对长视频或高分辨率视频尤其重要。
+
+\par 从 STC Connector 前的视觉 token 数量看，未压缩输入为
+
+\begin{equation}
+    \label{equ:method-token-before-stc-raw}
+    N_{\mathrm{before}}^{\mathrm{raw}} = T G^2,
+\end{equation}
+
+\par 压缩后变为
+
+\begin{equation}
+    \label{equ:method-token-before-stc-compressed}
+    N_{\mathrm{before}}^{\mathrm{comp}} = T G_c^2.
+\end{equation}
+
+\par 二者之比即为\autoref{equ:method-compression-ratio}中的 token 保留率 $\rho$。当 $G$ 可以被 $s$ 整除时，有
+
+\begin{equation}
+    \label{equ:method-complexity-scale}
+    \rho = \frac{1}{s^2}.
+\end{equation}
+
+\par 因此，$s=2,3,4$ 分别对应约 $25.00\%$、$11.11\%$、$6.25\%$ 的 STC 前视觉 token 保留率。虽然视觉编码器本身仍需处理原始采样帧，无法通过该模块减少 CLIP 前向计算，但 STC Connector、LLM prefill、注意力缓存和中间激活的开销均会随视觉 token 数量下降而降低。
+
+\par 显存方面，推理阶段的主要开销包括模型参数、视觉特征中间激活、LLM KV cache 以及 prefill 过程中的注意力中间结果。本文方法不改变模型主体参数规模，但减少了 STC 后传入 LLM 的视觉 token 长度，因此能够降低与视觉前缀相关的 KV cache 和注意力矩阵开销。设压缩前后进入 LLM 的视觉 token 长度分别为 $L_v$ 与 $L_v'$，则视觉部分 KV cache 的存储量近似满足
+
+\begin{equation}
+    \label{equ:method-kv-cache}
+    \frac{M_{\mathrm{KV}}'}{M_{\mathrm{KV}}}
+    \approx
+    \frac{L_v'}{L_v}.
+\end{equation}
+
+\par 延迟方面，本文在评测实现中记录整体推理时间、prefill 时间、decode 时间与峰值显存。由于 decode 阶段每次生成通常只新增一个文本 token，其速度主要受已缓存序列长度影响；而 prefill 阶段需要一次性处理完整的文本与视觉上下文，因此对视觉 token 数量更加敏感。本文方法的主要收益也集中体现在 prefill 延迟与显存占用降低上。
+
+\par 综上，本文方案通过在视觉编码器和 STC Connector 之间引入逐帧空间压缩，在保持 VideoLLaMA2 原有时空建模结构的同时，显著降低后续模块需要处理的视觉 token 数量。该设计兼顾了工程可接入性与推理效率，为后续实验中分析压缩倍率、准确率恢复和高压缩场景鲁棒性提供了方法基础。
