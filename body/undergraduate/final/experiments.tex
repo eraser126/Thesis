@@ -4,13 +4,11 @@
 
 本章围绕本文提出的视频视觉 token 压缩方法进行实验验证与结果分析。实验主要从压缩效率、模型准确率、不同压缩倍率下的鲁棒性以及跨数据集泛化能力等方面展开。本文以 VideoLLaMA2-7B-16F 作为基础视频大模型，在不改变语言模型、视觉塔和原始时空连接模块主体结构的前提下，将 TokenPacker 作为帧级空间视觉 token 压缩模块接入模型推理流程，并在 MVBench 数据集上进行主要实验验证\cite{videollama22024,mvbench2024,tokenpacker2024}。
 
-本章实验重点回答以下问题：第一，引入视觉 token 压缩后，模型的视觉 token 数量、推理延迟与吞吐率是否得到改善；第二，TokenPacker 直接迁移到 VideoLLaMA2 后是否存在性能下降问题，token 校准与轻量微调能否缓解该问题；第三，在不同压缩倍率下，本文方法与 Mean Pooling 等固定压缩方法相比是否具有更好的高压缩鲁棒性；第四，在不使用目标测试集进行校准的情况下，本文方法是否具备一定跨数据集泛化能力。由于当前 Video-MME 泛化实验数据尚未完全整理，本章暂将泛化能力实验部分保留为空，后续补充完整实验结果。
+本章实验重点回答以下问题：第一，引入视觉 token 压缩后，模型的视觉 token 数量、推理延迟与吞吐率是否得到改善；第二，TokenPacker 直接迁移到 VideoLLaMA2 后是否存在性能下降问题，token 校准与轻量微调能否缓解该问题；第三，在不同压缩倍率下，本文方法与 Mean Pooling 等固定压缩方法相比是否具有更好的高压缩鲁棒性；第四，在不使用目标测试集进行校准的情况下，本文方法是否具备一定跨数据集泛化能力。
 
 \subsection{实验环境与数据集}
 
 \subsubsection{实验环境}
-
-本文实验在单卡 NVIDIA GeForce RTX 4090 平台上完成。训练与推理均采用 batch size 为 1 的设置，并在相同硬件环境下统计模型推理延迟、prefill 时间、decode 时间、吞吐率与峰值显存。实验所使用的主要软硬件环境如\autoref{tab:experiment_environment}所示。
 
 \begin{table}[htbp]
     \centering
@@ -30,6 +28,8 @@
         \bottomrule
     \end{tabularx}
 \end{table}
+
+本文实验在单卡 NVIDIA GeForce RTX 4090 平台上完成。训练与推理均采用 batch size 为 1 的设置，并在相同硬件环境下统计模型推理延迟、prefill 时间、decode 时间、吞吐率与峰值显存。实验所使用的主要软硬件环境如\autoref{tab:experiment_environment}所示。
 
 需要说明的是，NVIDIA-SMI 中显示的 CUDA Version 表示驱动支持的最高 CUDA 版本，而本文 PyTorch 实际运行时使用的是 CUDA 11.8。为保证不同方法之间的对比公平性，所有推理实验均在相同硬件环境、相同 batch size 和相同解码设置下完成。
 
@@ -68,7 +68,7 @@
 
 具体而言，校准子集从 MVBench 的 20 个任务类别中分别随机抽取最多 50 个视频，形成 `data/calibration\_videos\_mvbench\_clip.txt`。该文件仅用于阶段一无标签 token 校准和可选的阶段二轻量监督微调。正式 MVBench 评测时使用 `--exclude-video-list` 参数排除该校准子集，并在每个任务类别中最多抽取 50 个视频用于评测。该设置能够降低校准数据泄漏对评测结果的影响。
 
-此外，本文计划使用 Video-MME 作为跨数据集泛化测试集\cite{videomme2025}。Video-MME 不参与 TokenPacker 的校准或监督微调，仅用于测试 MVBench 上获得的压缩模型在新数据集上的泛化能力。由于当前 Video-MME 实验数据尚未完整整理，本章仅保留泛化实验章节结构，具体结果将在后续版本中补充。
+此外，本文使用 Video-MME 作为跨数据集泛化测试集\cite{videomme2025}。Video-MME 不参与 TokenPacker 的校准或监督微调，仅用于测试 MVBench 上获得的压缩模型在新数据集上的泛化能力。与 MVBench 相比，Video-MME 覆盖感知、识别、推理和信息概括等更多类型的视频理解任务，因此能够用于观察压缩模块是否只适配 MVBench 分布，或是否能够迁移到新的评测基准上。
 
 \subsubsection{对比方法}
 
@@ -141,7 +141,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:efficiency_gain_result}不同压缩倍率下的效率收益}
-    \begin{tabularx}{\textwidth}{c c c c}
+    \begin{tabular}{c c c c}
         \toprule
         Scale & Accuracy Drop & Latency Reduction & Throughput Gain \\
         \midrule
@@ -149,7 +149,7 @@
         3 & -19.96\% & 28.0\% & 38.8\% \\
         4 & -20.71\% & 29.8\% & 42.4\% \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 进一步分析 prefill 与 decode 阶段可以发现，视觉 token 压缩主要降低的是 prefill 阶段耗时。Baseline 的 prefill 时间为 0.1943 秒，而 scale factor 为 2、3、4 时分别下降到 0.0775 秒、0.0539 秒和 0.0443 秒。这一现象符合视频多模态大模型的推理过程特点：视觉 token 主要作为输入上下文参与 prefill 阶段计算，减少视觉 token 数量能够直接降低上下文编码阶段的注意力计算开销。相比之下，decode 阶段耗时变化并不明显，甚至略有增加，说明本文方法的主要效率收益来自视觉上下文长度的压缩，而不是答案生成阶段本身的加速。
@@ -167,7 +167,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:s2_overall_performance}Scale factor 为 2 时的整体准确率对比}
-    \begin{tabularx}{\textwidth}{l c}
+    \begin{tabular}{l c}
         \toprule
         Method & Overall Accuracy \\
         \midrule
@@ -177,7 +177,7 @@
         TokenPacker + Calibration (s2) & 41.32 \\
         TokenPacker + Finetune (s2) & 47.01 \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 可以看到，未压缩 VideoLLaMA2 Baseline 的准确率最高，为 57.37\%。Mean Pooling 在压缩到每帧 144 个 token 后，准确率为 50.47\%，相比 Baseline 下降 6.90 个百分点。TokenPacker 直接迁移后的准确率仅为 33.86\%，相比 Baseline 下降 23.51 个百分点，说明原始 TokenPacker 权重虽然能够完成视觉 token 压缩，但直接迁移到 VideoLLaMA2 的视频推理流程中存在明显适配问题。
@@ -243,7 +243,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:calibration_gain}Token 校准带来的准确率增益}
-    \begin{tabularx}{\textwidth}{c c c c}
+    \begin{tabular}{c c c c}
         \toprule
         Scale & TokenPacker & TP-Calib & Gain \\
         \midrule
@@ -251,7 +251,7 @@
         3 & 32.74 & 37.41 & +4.67 \\
         4 & 32.74 & 36.66 & +3.92 \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 结果表明，token 校准在三个压缩倍率下均带来了准确率提升。其中，scale factor 为 2 时提升最明显，准确率提升 7.46 个百分点；scale factor 为 3 和 4 时分别提升 4.67 和 3.92 个百分点。这一现象说明，当压缩倍率较低、保留 token 数量相对较多时，TokenPacker 仍有较充分的信息容量用于对齐原始视觉 token 分布，因此校准带来的收益更明显。而在更高压缩倍率下，由于 token 预算更小，视觉信息本身已经被更强地压缩，校准能够恢复的性能空间相对有限。
@@ -261,7 +261,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:finetune_gain}轻量监督微调带来的准确率增益}
-    \begin{tabularx}{\textwidth}{c c c c}
+    \begin{tabular}{c c c c}
         \toprule
         Scale & TP-Calib & TP-Finetune & Gain \\
         \midrule
@@ -269,7 +269,7 @@
         3 & 37.41 & 43.94 & +6.53 \\
         4 & 36.66 & 41.88 & +5.22 \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 可以看到，轻量微调在三个压缩倍率下同样均带来进一步提升。其中，scale factor 为 3 时提升 6.53 个百分点，scale factor 为 4 时提升 5.22 个百分点，说明在高压缩设置下，任务监督信号对压缩 token 表示的优化仍然有效。与 token 校准相比，轻量微调不仅关注压缩 token 与原始视觉 token 的特征一致性，还直接优化下游问答任务表现，因此能够在校准基础上进一步恢复准确率。
@@ -287,7 +287,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:scale_overall_accuracy}不同压缩倍率下的整体准确率对比}
-    \begin{tabularx}{\textwidth}{c c c c c}
+    \begin{tabular}{c c c c c}
         \toprule
         Scale & Mean Pooling & TokenPacker & TP-Calib & TP-Finetune \\
         \midrule
@@ -295,7 +295,7 @@
         3 & 43.66 & 32.74 & 37.41 & 43.94 \\
         4 & 39.37 & 32.74 & 36.66 & 41.88 \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 \begin{figure}[htbp]
@@ -317,7 +317,7 @@
 \begin{table}[htbp]
     \centering
     \caption{\label{tab:accuracy_drop_scale}不同方法随压缩倍率增加的准确率变化}
-    \begin{tabularx}{\textwidth}{l c c c c}
+    \begin{tabular}{l c c c c}
         \toprule
         Method & Scale=2 & Scale=3 & Scale=4 & $\Delta$(s2$\rightarrow$s4) \\
         \midrule
@@ -326,7 +326,7 @@
         TP + Calibration & 41.32 & 37.41 & 36.66 & -4.66 \\
         TP + Finetune & 47.01 & 43.94 & 41.88 & -5.13 \\
         \bottomrule
-    \end{tabularx}
+    \end{tabular}
 \end{table}
 
 从下降幅度看，Mean Pooling 的准确率下降最大，说明其在高压缩倍率下难以稳定保持任务性能。其原因在于 Mean Pooling 直接对局部 token 求平均，虽然能够较好保留整体分布形态，但缺乏对局部重要区域的自适应选择能力。当压缩倍率较高时，大量细粒度视觉信息被平均化，容易削弱模型对动作细节、目标交互和场景变化的判断能力。
@@ -345,11 +345,46 @@ TokenPacker 则采用可学习的注意力聚合机制，通过低分辨率 quer
 
 \subsection{泛化能力实验}
 
-本节计划使用 Video-MME 数据集评估本文方法的跨数据集泛化能力。Video-MME 不参与 TokenPacker 的无标签校准和轻量监督微调，仅作为独立测试集使用。正式实验将直接加载在 MVBench 上校准或微调得到的 TokenPacker checkpoint，并在 Video-MME 上比较 Baseline、Mean Pooling、TokenPacker Calibrated 和 TokenPacker Finetuned 等方法的性能。
+本节使用 Video-MME 数据集评估本文方法的跨数据集泛化能力。Video-MME 不参与 TokenPacker 的无标签校准和轻量监督微调，仅作为独立测试集使用。实验直接加载在 MVBench 上得到的 TokenPacker checkpoint，并比较未压缩 Baseline、直接迁移的 TokenPacker Init 以及经过校准与轻量微调后的 TP-Calib+FT。该实验的核心目的是验证本文方法是否只是对 MVBench 数据分布产生了特定适配，还是能够在未参与训练和校准的新视频理解基准上保持一定有效性。
 
-该实验的核心目的是验证本文方法是否只是对 MVBench 数据分布产生了特定适配，还是能够在未参与训练和校准的新视频理解基准上保持一定有效性。后续将从总体准确率、不同视频时长、不同任务类型以及是否使用字幕等维度进行分析。
+\begin{table}[H]
+    \centering
+    \setlength{\tabcolsep}{6pt}
+    \renewcommand{\arraystretch}{0.75}
+    \caption{\label{tab:videomme_generalization}Video-MME 泛化能力实验结果}
+    \begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}l c c c@{}}
+        \toprule
+        Task Category & Baseline & TP-Init & TP-Calib+FT \\
+        \midrule
+        Temporal Perception & 45.83\% & 50.00\% & 43.30\% \\
+        Spatial Perception & 71.43\% & 50.00\% & 50.00\% \\
+        Attribute Perception & 60.48\% & 24.20\% & 48.50\% \\
+        Action Recognition & 53.21\% & 37.20\% & 44.30\% \\
+        Object Recognition & 58.33\% & 38.90\% & 39.30\% \\
+        OCR Problems & 38.30\% & 31.90\% & 40.00\% \\
+        Counting Problem & 31.58\% & 31.60\% & 35.70\% \\
+        Temporal Reasoning & 36.11\% & 31.50\% & 33.30\% \\
+        Spatial Reasoning & 81.58\% & 31.60\% & 45.90\% \\
+        Action Reasoning & 41.96\% & 30.40\% & 42.50\% \\
+        Object Reasoning & 48.54\% & 36.90\% & 38.10\% \\
+        Information Synopsis & 70.79\% & 37.10\% & 54.50\% \\
+        \midrule
+        Overall Accuracy & 52.06\% & 34.70\% & 42.95\% \\
+        \bottomrule
+    \end{tabular*}
+\end{table}
 
-由于当前 Video-MME 实验数据尚未整理完成，本节暂不报告具体数值结果。后续补充实验数据后，将在本节加入对应表格与分析。
+如\autoref{tab:videomme_generalization}所示，未压缩 Baseline 在 Video-MME 上的总体准确率为 52.06\%，直接迁移的 TokenPacker Init 准确率为 34.70\%，相比 Baseline 下降 17.36 个百分点。这一结果与 MVBench 主实验中的现象一致，说明图像场景下的 TokenPacker 压缩权重直接接入 VideoLLaMA2 后，在新的评测集上同样存在明显的分布适配问题。由于 Video-MME 未参与校准和微调，该下降不能简单归因于某一数据集的任务设置，而更可能来自压缩 token 分布与原始 STC Connector 输入分布之间的不匹配。
+
+经过 token 校准与轻量微调后，TP-Calib+FT 在 Video-MME 上的总体准确率提升到 42.95\%，相比 TP-Init 提升 8.25 个百分点。该结果表明，本文提出的校准与轻量微调流程不仅能够改善 MVBench 上的表现，也能够在未参与训练的新数据集上带来一定泛化收益。换言之，校准和微调并非只记忆 MVBench 中的样本，而是在一定程度上改善了压缩 token 与 VideoLLaMA2 后端模块之间的通用适配关系。
+
+从不同任务类别看，TP-Calib+FT 在 Attribute Perception、Action Recognition、OCR Problems、Counting Problem、Action Reasoning 和 Information Synopsis 等任务上均明显优于 TP-Init。例如，Attribute Perception 从 24.20\% 提升到 48.50\%，Information Synopsis 从 37.10\% 提升到 54.50\%，Action Reasoning 从 30.40\% 提升到 42.50\%。这些结果说明，经过适配后的 TokenPacker 能够恢复一部分与属性识别、动作理解和视频内容概括相关的视觉语义信息。
+
+然而，TP-Calib+FT 与 Baseline 之间仍存在 9.11 个百分点的总体准确率差距，并且在 Spatial Perception、Object Recognition、Temporal Reasoning 和 Spatial Reasoning 等任务上仍明显低于未压缩模型。其中，Spatial Reasoning 从 Baseline 的 81.58\% 降至 45.90\%，说明强压缩后的视觉 token 对空间关系推理仍存在较大信息损失。这表明本文方法虽然具有一定跨数据集泛化能力，但当前逐帧空间压缩策略仍难以完全保留所有细粒度空间结构和复杂推理所需的信息。
+
+值得注意的是，TP-Calib+FT 在 OCR Problems、Counting Problem 和 Action Reasoning 三类任务上略高于 Baseline，分别达到 40.00\%、35.70\% 和 42.50\%。这一现象可能与测试样本数量、候选答案分布以及压缩后 token 对低频语义的突出作用有关，不能简单解释为压缩方法在这些能力上全面超过原模型。但它至少说明，适当的视觉 token 压缩并不必然削弱所有类型的视频理解能力，在部分任务上还可能通过减少冗余视觉 token 干扰，使模型更加关注主要语义线索。
+
+总体来看，Video-MME 泛化实验进一步验证了本文方法的两个结论。第一，TokenPacker 直接迁移到视频大模型时存在稳定的适配性下降，需要通过校准和微调进行缓解。第二，经过适配后的 TokenPacker 在新数据集上仍能保持一定性能恢复能力，说明本文方法并非仅对 MVBench 有效。但与此同时，压缩模型与未压缩 Baseline 仍存在明显差距，尤其是在空间关系和物体级细粒度推理任务上表现不足，这也为后续设计时空联合压缩和自适应 token 保留策略提供了改进方向。
 
 \subsection{实验结果分析与讨论}
 

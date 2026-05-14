@@ -35,15 +35,18 @@
 \par 在实际实现中，VideoLLaMA2 会先将时间维与 batch 维合并，将输入重排为 $(BT) \times C \times H \times W$ 后送入视觉编码器。视觉编码器输出两类特征：一类是选定层的 patch token，记为 \texttt{single\_features}；另一类是多个 hidden states 拼接后的多层特征，记为 \texttt{multi\_features}。随后，本文在 STC Connector 之前插入 \texttt{VideoTokenPackerWrapper}，将帧级张量展平为 $(BT) \times N \times D$ 后调用 TokenPacker 进行空间压缩，并在压缩完成后重新恢复为 $B \times T \times N_c \times D$ 的视频特征格式。这里 $N$ 表示原始每帧 patch token 数量，$N_c$ 表示压缩后的每帧 token 数量。
 
 \begin{table}[ht]
+    \centering
     \caption{\label{tab:method-module-io}本文方法中主要模块的输入输出形式}
-    \begin{tabularx}{\linewidth}{|c|X<{\centering}|X<{\centering}|}
-        \hline
-        模块 & 输入 & 输出 \\ \hline
-        帧采样 & 原始视频 & $\mathbf{V}\in\mathbb{R}^{B\times T\times C\times H\times W}$ \\ \hline
-        视觉编码器 & $(BT)\times C\times H\times W$ & $\mathbf{X}\in\mathbb{R}^{B\times T\times N\times D}$，$\mathbf{M}\in\mathbb{R}^{B\times T\times N\times 4D}$ \\ \hline
-        TokenPacker & $\mathbf{X}$，$\mathbf{M}$ & $\hat{\mathbf{X}}\in\mathbb{R}^{B\times T\times N_c\times D}$ \\ \hline
-        STC Connector & $\hat{\mathbf{X}}$ & $\mathbf{Z}\in\mathbb{R}^{B\times L_v\times D_l}$ \\ \hline
-        LLM Decoder & 文本 token 与视觉 token & 生成式回答 \\ \hline
+    \begin{tabularx}{\textwidth}{c >{\centering\arraybackslash}X >{\centering\arraybackslash}X}
+        \toprule
+        模块 & 输入 & 输出 \\
+        \midrule
+        帧采样 & 原始视频 & $\mathbf{V}\in\mathbb{R}^{B\times T\times C\times H\times W}$ \\
+        视觉编码器 & $(BT)\times C\times H\times W$ & $\mathbf{X}\in\mathbb{R}^{B\times T\times N\times D}$，$\mathbf{M}\in\mathbb{R}^{B\times T\times N\times 4D}$ \\
+        TokenPacker & $\mathbf{X}$，$\mathbf{M}$ & $\hat{\mathbf{X}}\in\mathbb{R}^{B\times T\times N_c\times D}$ \\
+        STC Connector & $\hat{\mathbf{X}}$ & $\mathbf{Z}\in\mathbb{R}^{B\times L_v\times D_l}$ \\
+        LLM Decoder & 文本 token 与视觉 token & 生成式回答 \\
+        \bottomrule
     \end{tabularx}
 \end{table}
 
@@ -273,15 +276,18 @@
 \par 在 CLIP ViT-L/14-336 与 $T=16$ 的默认设置下，不同 \texttt{scale\_factor} 对应的 token 数量如\autoref{tab:method-token-budget}所示。
 
 \begin{table}[ht]
+    \centering
     \caption{\label{tab:method-token-budget}不同压缩尺度下 STC 前视觉 token 数量}
-    \begin{tabularx}{\linewidth}{|c|c|c|c|c|}
-        \hline
-        \texttt{scale\_factor} & 每帧网格 & 每帧 token 数 & 视频总 token 数 & token 保留率 \\ \hline
-        未压缩 & $24\times24$ & $576$ & $9216$ & $100\%$ \\ \hline
-        $2$ & $12\times12$ & $144$ & $2304$ & $25.00\%$ \\ \hline
-        $3$ & $8\times8$ & $64$ & $1024$ & $11.11\%$ \\ \hline
-        $4$ & $6\times6$ & $36$ & $576$ & $6.25\%$ \\ \hline
-    \end{tabularx}
+    \begin{tabular}{c c c c c}
+        \toprule
+        \texttt{scale\_factor} & 每帧网格 & 每帧 token 数 & 视频总 token 数 & token 保留率 \\
+        \midrule
+        未压缩 & $24\times24$ & $576$ & $9216$ & $100\%$ \\
+        $2$ & $12\times12$ & $144$ & $2304$ & $25.00\%$ \\
+        $3$ & $8\times8$ & $64$ & $1024$ & $11.11\%$ \\
+        $4$ & $6\times6$ & $36$ & $576$ & $6.25\%$ \\
+        \bottomrule
+    \end{tabular}
 \end{table}
 
 \par 需要注意的是，本文的 \texttt{scale\_factor} 表示空间边长方向的缩放比例，而不是最终 token 数量的线性缩减比例。由于视觉 token 来自二维空间网格，最终 token 数量近似按 $s^2$ 倍减少。例如，当 $s=4$ 时，每帧 token 数由 $576$ 降至 $36$，对应 $16$ 倍的空间 token 压缩。
