@@ -3,15 +3,23 @@
     \bfseries \zihao{3} 摘~要
 \end{center}
 
-随着多模态大模型的发展，视频大模型在视频问答、时空推理与复杂场景理解等任务中展现出较强能力。然而，相较于图像场景，视频数据具有更长的时序长度与更高的视觉冗余，导致视频大模型在推理过程中面临视觉 token 数量庞大、显存占用高以及推理延迟大的问题，严重制约了其实际部署与应用。针对上述问题，本文围绕多模态视频大模型的高效推理展开研究，重点研究视觉 token 压缩技术在视频场景中的迁移与优化方法。
+随着多模态大模型从图像理解扩展到视频理解，视频问答、时空推理和复杂场景分析等任务对模型推理效率提出了更高要求。视频输入包含大量连续帧，视觉 token 数量随帧数和分辨率快速增长，容易造成显存占用高、prefill 阶段耗时长和端到端推理延迟增加。针对这一问题，本文围绕视频大模型中的视觉 token 压缩展开研究，探索将图像场景下的 TokenPacker 压缩思想迁移至 VideoLLaMA2 的可行性。
 
-本文以视频大模型 VideoLLaMA2 为基础框架，引入 TokenPacker 中提出的视觉 token 压缩思想，设计了一种适用于视频场景的视觉 token 高效压缩方案。本文在不改变原有大语言模型结构与时空融合模块的前提下，将 TokenPacker 模块接入视觉编码器与时空连接模块之间，对视频帧中的空间视觉 token 进行压缩，以降低后续时空建模阶段的计算开销。针对视频特征与图像特征在时序结构上的差异，本文对原始 TokenPacker 的输入输出形式进行了适配与重构，实现了视频特征在时空维度下的稳定压缩与重组。
+本文在不修改 VideoLLaMA2 原有语言模型和 STC 时空融合模块的前提下，将 TokenPacker 接入视觉编码器与 STC Connector 之间，设计逐帧空间 token 压缩方案。该方案仅压缩每帧内部的空间视觉 token，并保持视频时间维结构不变，从而降低后续时空建模与语言模型 prefill 阶段的计算开销。针对直接迁移带来的视觉 token 分布偏移问题，本文进一步构建 token 校准与轻量监督微调流程，通过特征分布对齐和任务目标适配提升压缩模块与原模型后端的兼容性。
 
-此外，为缓解压缩后视觉语义信息损失带来的性能下降问题，本文进一步提出基于 token 分布对齐的校准方法，通过约束压缩后 token 与原始视觉 token 在统计分布上的一致性，提高压缩特征对原模型的适配能力。同时，本文结合轻量化微调策略，对压缩模块进行进一步优化，以提升高压缩倍率场景下模型的推理性能与鲁棒性。
+实验在 MVBench 和 Video-MME 等视频理解基准上进行。结果表明，本文方法能够显著减少视觉 token 数量并降低推理延迟；经过校准和微调后，压缩模型的准确率相比直接迁移版本得到明显恢复。进一步对比 Mean Pooling 发现，分布保持型固定压缩方法在低压缩倍率下表现更稳定，而本文采用的可学习压缩方法在高压缩倍率下准确率下降更平缓，展现出更好的高压缩鲁棒性。本文研究验证了视觉 token 压缩在视频大模型高效推理中的应用价值，并为后续时空联合压缩和自适应 token 保留策略提供了实验参考。
 
-实验部分基于 MVBench 等视频理解数据集展开验证，并从推理准确率、视觉 token 数量、压缩倍率与推理耗时等多个维度进行分析。实验结果表明，本文方法能够在显著降低视觉 token 数量与推理开销的同时，较好地保持模型的视频理解能力；相比简单的均值池化压缩方法，本文方法在高压缩倍率场景下具有更稳定的性能表现。研究结果验证了视觉 token 压缩技术在视频大模型高效推理中的可行性，为后续视频多模态模型的轻量化部署与高效推理提供了参考。
+\textbf{关键词：}视频大模型；多模态大模型；视觉 token 压缩；TokenPacker；高效推理
 
 \cleardoublepage{}
 \begin{center}
     \bfseries \zihao{3} Abstract
 \end{center}
+
+With the development of multimodal large language models from image understanding to video understanding, tasks such as video question answering, spatio-temporal reasoning, and complex scene analysis impose increasing demands on inference efficiency. Compared with images, videos contain a large number of consecutive frames, and the number of visual tokens grows rapidly with the frame number and input resolution. This leads to high memory consumption, long prefill time, and increased end-to-end inference latency. To address this problem, this thesis studies visual token compression for video large language models and explores the feasibility of transferring the TokenPacker compression mechanism from image-based multimodal models to VideoLLaMA2.
+
+Without modifying the original language model or the STC spatio-temporal connector in VideoLLaMA2, this thesis inserts TokenPacker between the vision encoder and the STC Connector, and designs a frame-level spatial token compression scheme. The proposed scheme compresses spatial visual tokens within each frame while preserving the temporal structure of the video, thereby reducing the computational cost of subsequent spatio-temporal modeling and the prefill stage of the language model. To alleviate the visual token distribution shift caused by direct transfer, this thesis further introduces token calibration and lightweight supervised fine-tuning, which improve the compatibility between compressed visual tokens and the original model backend through feature distribution alignment and task-level adaptation.
+
+Experiments are conducted on video understanding benchmarks including MVBench and Video-MME. The results show that the proposed method significantly reduces the number of visual tokens and improves inference efficiency. After calibration and fine-tuning, the compressed model achieves clear accuracy recovery compared with the directly transferred version. Further comparison with Mean Pooling indicates that distribution-preserving fixed compression is more stable under low compression ratios, while the learnable compression method studied in this thesis shows a smoother accuracy degradation under high compression ratios, demonstrating better robustness in highly compressed settings. This work verifies the practical value of visual token compression for efficient video large language model inference and provides experimental insights for future spatio-temporal joint compression and adaptive token retention strategies.
+
+\textbf{Key words:} video large language model; multimodal large language model; visual token compression; TokenPacker; efficient inference

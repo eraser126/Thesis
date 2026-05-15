@@ -347,7 +347,7 @@ TokenPacker 则采用可学习的注意力聚合机制，通过低分辨率 quer
 
 本节使用 Video-MME 数据集评估本文方法的跨数据集泛化能力。Video-MME 不参与 TokenPacker 的无标签校准和轻量监督微调，仅作为独立测试集使用。实验直接加载在 MVBench 上得到的 TokenPacker checkpoint，并比较未压缩 Baseline、直接迁移的 TokenPacker Init 以及经过校准与轻量微调后的 TP-Calib+FT。该实验的核心目的是验证本文方法是否只是对 MVBench 数据分布产生了特定适配，还是能够在未参与训练和校准的新视频理解基准上保持一定有效性。
 
-\begin{table}[H]
+\begin{table}[htb]
     \centering
     \setlength{\tabcolsep}{6pt}
     \renewcommand{\arraystretch}{0.75}
