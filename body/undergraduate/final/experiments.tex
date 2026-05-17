@@ -10,7 +10,7 @@
 
 \subsubsection{实验环境}
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:experiment_environment}实验软硬件环境}
     \begin{tabularx}{\textwidth}{lX}
@@ -44,7 +44,7 @@
 
 压缩模块插入在视觉塔输出与后续时序聚合/投影模块之间，对每一帧内部的空间视觉 token 进行压缩。除特别说明外，语言模型、视觉塔和原始 projector 均保持冻结，仅训练 TokenPacker core。基础视觉配置如\autoref{tab:basic_model_config}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:basic_model_config}基础模型与视觉输入配置}
     \begin{tabularx}{\textwidth}{lX}
@@ -74,7 +74,7 @@
 
 本文比较的主要方法包括未压缩 Baseline、Mean Pooling、TokenPacker Init、TokenPacker Calibrated 和 TokenPacker Finetuned。所有压缩方法均在相同 scale factor 下进行对比，以保证每帧视觉 token 预算一致。各方法说明如\autoref{tab:comparison_methods}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:comparison_methods}实验对比方法}
     \begin{tabularx}{\textwidth}{lX}
@@ -96,7 +96,7 @@
 
 由于 CLIP 视觉塔的空间网格为 $24\times24$，本文设置的 scale factor 分别为 2、3 和 4，均可整除原始空间网格，因此无需额外 padding。不同压缩倍率对应的每帧 token 数如\autoref{tab:compression_scale_setting}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:compression_scale_setting}不同压缩倍率下的 token 预算}
     \begin{tabularx}{\textwidth}{c c c X}
@@ -117,7 +117,7 @@
 
 本节主要验证本文方法是否能够有效降低视觉 token 数量并提升推理效率。实验在 MVBench 正式评测集上进行，对比未压缩 Baseline 与 TokenPacker 在 scale factor 分别为 2、3、4 时的效率表现。实验结果如\autoref{tab:compression_efficiency_result}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \small
     \caption{\label{tab:compression_efficiency_result}压缩效率实验结果}
@@ -138,7 +138,7 @@
 
 从推理延迟来看，Baseline 的平均推理延迟为 0.4762 秒。TokenPacker 在 scale factor 为 2、3、4 时的平均推理延迟分别为 0.3699 秒、0.3431 秒和 0.3344 秒。与 Baseline 相比，三种压缩设置分别带来了 22.3\%、28.0\% 和 29.8\% 的延迟下降。与此同时，吞吐率从 Baseline 的 2.1000 samples/s 分别提升到 2.7037、2.9143 和 2.9900 samples/s，对应吞吐率增益分别为 28.7\%、38.8\% 和 42.4\%。效率提升结果如\autoref{tab:efficiency_gain_result}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:efficiency_gain_result}不同压缩倍率下的效率收益}
     \begin{tabular}{c c c c}
@@ -164,7 +164,7 @@
 
 在 scale factor 为 2 的设置下，不同方法的整体准确率如\autoref{tab:s2_overall_performance}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:s2_overall_performance}Scale factor 为 2 时的整体准确率对比}
     \begin{tabular}{l c}
@@ -184,7 +184,7 @@
 
 经过无标签 token 校准后，TokenPacker 准确率从 33.86\% 提升到 41.32\%，提升 7.46 个百分点。进一步进行轻量监督微调后，准确率提升到 47.01\%，相比直接迁移版本提升 13.15 个百分点，相比校准版本进一步提升 5.69 个百分点。这说明 token 校准和轻量微调均能够缓解 TokenPacker 迁移后的性能下降问题。
 
-\begin{figure}[htbp]
+\begin{figure}[!htbp]
     \centering
     \includegraphics[width=0.88\textwidth]{figure/experiment/exp_img2.png}
     \caption{\label{fig:performance_recovery}TokenPacker 迁移到 VideoLLaMA2 后的性能恢复过程}
@@ -196,7 +196,7 @@
 
 为了进一步分析不同方法在各类视频理解能力上的表现，本文统计了 scale factor 为 2 时各方法在 MVBench 不同子任务上的准确率，结果如\autoref{tab:s2_category_performance}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \scriptsize
     \caption{\label{tab:s2_category_performance}Scale factor 为 2 时不同子任务准确率对比}
@@ -240,7 +240,7 @@
 
 为了更清晰地观察校准和微调带来的性能变化，本文统计了不同 scale factor 下 TokenPacker 直接迁移、校准和微调后的整体准确率变化。校准增益如\autoref{tab:calibration_gain}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:calibration_gain}Token 校准带来的准确率增益}
     \begin{tabular}{c c c c}
@@ -258,7 +258,7 @@
 
 轻量监督微调的增益如\autoref{tab:finetune_gain}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:finetune_gain}轻量监督微调带来的准确率增益}
     \begin{tabular}{c c c c}
@@ -284,7 +284,7 @@
 
 不同方法在不同压缩倍率下的整体准确率如\autoref{tab:scale_overall_accuracy}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:scale_overall_accuracy}不同压缩倍率下的整体准确率对比}
     \begin{tabular}{c c c c c}
@@ -298,7 +298,7 @@
     \end{tabular}
 \end{table}
 
-\begin{figure}[htbp]
+\begin{figure}[!htbp]
     \centering
     \includegraphics[width=0.88\textwidth]{figure/experiment/exp_img1.png}
     \caption{\label{fig:overall_accuracy_vs_scale}不同压缩倍率下整体准确率变化趋势}
@@ -314,7 +314,7 @@
 
 为进一步量化不同方法对压缩倍率变化的敏感性，本文统计了 scale factor 从 2 增加到 4 时各方法的准确率变化，结果如\autoref{tab:accuracy_drop_scale}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:accuracy_drop_scale}不同方法随压缩倍率增加的准确率变化}
     \begin{tabular}{l c c c c}
@@ -347,7 +347,7 @@ TokenPacker 则采用可学习的注意力聚合机制，通过低分辨率 quer
 
 本节使用 Video-MME 数据集评估本文方法的跨数据集泛化能力。Video-MME 不参与 TokenPacker 的无标签校准和轻量监督微调，仅作为独立测试集使用。实验直接加载在 MVBench 上得到的 TokenPacker checkpoint，并比较未压缩 Baseline、直接迁移的 TokenPacker Init 以及经过校准与轻量微调后的 TP-Calib+FT。该实验的核心目的是验证本文方法是否只是对 MVBench 数据分布产生了特定适配，还是能够在未参与训练和校准的新视频理解基准上保持一定有效性。
 
-\begin{table}[htb]
+\begin{table}[!htbp]
     \centering
     \setlength{\tabcolsep}{6pt}
     \renewcommand{\arraystretch}{0.75}

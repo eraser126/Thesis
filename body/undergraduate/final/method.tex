@@ -12,7 +12,7 @@
 
 \par 具体而言，视频输入首先经均匀采样得到固定长度的帧序列，再由 CLIP 视觉编码器逐帧提取视觉 token。随后，改造后的 TokenPacker 以帧为单位执行空间聚合，将高分辨率 patch token 压缩为更少数量的帧级 token。压缩后的视觉表示继续送入 VideoLLaMA2 原有 STC Connector 完成时空建模，并最终与文本 token 一同输入 LLM 生成回答。
 
-\begin{figure}[htb]
+\begin{figure}[!htbp]
     \centering
     \includegraphics[width=.9\linewidth,keepaspectratio]{figure/method/arch.png}
     \caption{\label{fig:method-architecture}本文方法的整体架构}
@@ -27,7 +27,7 @@
 
 \par 在实际实现中，VideoLLaMA2 会先将时间维与 batch 维合并，将输入重排为 $(BT) \times C \times H \times W$ 后送入视觉编码器。视觉编码器输出两类特征：一类是选定层的 patch token，记为 \texttt{single\_features}；另一类是多个 hidden states 拼接后的多层特征，记为 \texttt{multi\_features}。随后，本文在 STC Connector 之前插入 \texttt{VideoTokenPackerWrapper}，将帧级张量展平为 $(BT) \times N \times D$ 后调用 TokenPacker 进行空间压缩，并在压缩完成后重新恢复为 $B \times T \times N_c \times D$ 的视频特征格式。这里 $N$ 表示原始每帧 patch token 数量，$N_c$ 表示压缩后的每帧 token 数量。
 
-\begin{table}[htb]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:method-module-io}本文方法中主要模块的输入输出形式}
     \begin{tabularx}{\textwidth}{c >{\centering\arraybackslash}X >{\centering\arraybackslash}X}
@@ -75,7 +75,7 @@
 
 \par 为了更清楚地说明视觉特征构建过程，本文将其拆分为四个连续的工程步骤，如\autoref{tab:method-feature-construction-flow}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:method-feature-construction-flow}视频视觉特征构建过程}
     \begin{tabularx}{\textwidth}{c l X}
@@ -204,7 +204,7 @@
 
 \par 因此，本文方法可以被理解为 frame-level spatial compression：压缩发生在每一帧的空间维度上，时间维结构被完整保留，并继续交由 STC Connector 进行时空融合。
 
-\begin{algorithm}[htb]
+\begin{algorithm}[!htbp]
     \caption{\label{alg:video-tokenpacker}基于 TokenPacker 的视频视觉 token 压缩流程}
     \begin{algorithmic}[1]
         \REQUIRE 单层视觉特征 $\mathbf{X}\in\mathbb{R}^{B\times T\times N\times D}$，多层视觉特征 $\mathbf{M}\in\mathbb{R}^{B\times T\times N\times 4D}$，空间压缩尺度 $s$
@@ -229,7 +229,7 @@
 
 \par 将 TokenPacker 迁移到 VideoLLaMA2 的关键工程问题在于维度对齐。原始 VideoLLaMA2 的 STC Connector 接收 $B\times T\times N\times D$ 的视觉特征，其中 $D$ 为视觉编码器 hidden size。压缩后，本文仅改变空间 token 数量，将 $N$ 替换为 $N_c$，而不改变时间维、batch 维和通道维。该维度变化如\autoref{tab:method-dimension-alignment}所示。
 
-\begin{table}[htbp]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:method-dimension-alignment}TokenPacker 接入前后的维度对齐方式}
     \begin{tabularx}{\textwidth}{l c X}
@@ -279,7 +279,7 @@
 
 \par 在 CLIP ViT-L/14-336 与 $T=16$ 的默认设置下，不同 \texttt{scale\_factor} 对应的 token 数量如\autoref{tab:method-token-budget}所示。
 
-\begin{table}[htb]
+\begin{table}[!htbp]
     \centering
     \caption{\label{tab:method-token-budget}不同压缩尺度下 STC 前视觉 token 数量}
     \begin{tabular}{c c c c c}
@@ -386,7 +386,7 @@
 
 \par 实现中，无标签校准数据由 MVBench 视频集合抽样得到\cite{mvbench2024}，训练时冻结主模型，仅更新 TokenPacker。该阶段不依赖人工问答标注，因此可以较低成本完成压缩模块与 VideoLLaMA2 后端的初步适配。
 
-\begin{algorithm}[htb]
+\begin{algorithm}[!htbp]
     \caption{\label{alg:token-calibration-finetune}Token 校准与轻量微调训练流程}
     \begin{algorithmic}[1]
         \REQUIRE 未压缩 VideoLLaMA2 模型 $F_{\mathrm{base}}$，插入 TokenPacker 的压缩模型 $F_{\mathrm{comp}}$，无标签视频集合 $\mathcal{D}_{u}$，监督问答集合 $\mathcal{D}_{s}$
